@@ -513,3 +513,20 @@ them.
 - AI codec modes: **specified, not implemented**; no mode values allocated.
 - No cryptographic capability claim. A `CapabilityHash` is an identifier.
 - No performance or model-checking claim for the new identities.
+
+## F5 — decoder limits, DAG frame source, adversarial vectors (2026-11-03)
+
+- The `decode`, `archive decode`, and `selector id|canonicalize` commands accept
+  the same ten limit flags as Rust, plus structured-item, selector-depth,
+  selector-operand, and archive-entry bounds. Defaults remain the normative v1
+  values.
+- `decode --frame-source DIR` now uses a lazy `dependency.DirectoryFrameSource`
+  and `modes.DecodeDAG`, so depth, cycle, and total-fetch limits are exercised
+  from the CLI.
+- The 36 adversarial vectors were copied byte-identically from the Rust
+  generator (`WeftCodec/conformance/v1/adversarial/`) into
+  `conformance/v1/adversarial/`; the court checks every mirrored file hash.
+  `bench/receipts/decoder-bombs-20261103T213314Z.json` reports 36/36 pass with
+  identical classes in both implementations.
+- Limits remain enforced before allocation; the Go zstd path already streamed,
+  and the shared 4 GiB-declared vector returns `Corrupt` at ~4.7 MiB RSS.
