@@ -468,7 +468,7 @@ closure and capability hash. Both are correct for their inputs.
 scripts/docker-court.sh go "cd WeftCodec-Go && go test ./..."
 # Observed: all packages ok, including
 #   ok github.com/infinityabundance/WeftCodec-Go/context
-# The context package has 4 top-level test functions; TestContextVectors runs
+# The context package has 5 top-level test functions; TestContextVectors runs
 # 16 vector subtests and TestCausalVectors runs 10 vector subtests.
 
 scripts/docker-court.sh go "cd WeftCodec-Go && gofmt -l context cmd/weftcodec limits hash && go vet ./..."

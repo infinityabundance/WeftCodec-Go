@@ -296,6 +296,25 @@ func TestCausalVectors(t *testing.T) {
 	}
 }
 
+func TestIdentityMode(t *testing.T) {
+	mode, err := weft.ParseIdentityMode("bytes_only")
+	if err != nil || mode != weft.BytesOnly {
+		t.Fatalf("bytes_only: %v %v", mode, err)
+	}
+	mode, err = weft.ParseIdentityMode("causal_exact")
+	if err != nil || mode != weft.CausalExact {
+		t.Fatalf("causal_exact: %v %v", mode, err)
+	}
+	if weft.CausalExact.String() != "causal_exact" {
+		t.Fatalf("string form: %s", weft.CausalExact)
+	}
+	if _, err := weft.ParseIdentityMode("causalish"); err == nil {
+		t.Fatalf("accepted unknown identity mode")
+	} else if got := string(werrors.ClassOf(err)); got != "UnsupportedVersion" {
+		t.Fatalf("class %s, want UnsupportedVersion", got)
+	}
+}
+
 func TestBudgetAndCapability(t *testing.T) {
 	budget, err := weft.ParseBudget("max_results=10,max_bytes=1024,max_depth=3")
 	if err != nil {
