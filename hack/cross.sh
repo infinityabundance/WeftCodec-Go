@@ -21,18 +21,23 @@ GO="$CACHE/weftcodec-go"
 
 make_src() {
   mkdir -p "$CROSS/src"
-  if [[ -f "$CROSS/src/payload.bin" ]]; then
-    return
+  if [[ ! -f "$CROSS/src/payload.bin" ]]; then
+    : > "$CROSS/src/empty.bin"
+    dd if=/dev/urandom of="$CROSS/src/payload.bin" bs=1024 count=8 status=none
+    dd if=/dev/urandom of="$CROSS/src/base.bin" bs=1024 count=4 status=none
+    cp "$CROSS/src/base.bin" "$CROSS/src/target.bin"
+    printf 'INSERTED-REVISION-2' | dd of="$CROSS/src/target.bin" bs=1 seek=100 conv=notrunc status=none
+    printf 'REPLACED-BLOCK' | dd of="$CROSS/src/target.bin" bs=1 seek=700 conv=notrunc status=none
+    awk 'BEGIN { s = "weft codec dictionary line alpha beta gamma\n"; out = ""; while (length(out) < 1024) out = out s; printf "%s", substr(out, 1, 1024) }' > "$CROSS/src/dict.bin"
+    awk 'BEGIN { s = "weft codec dictionary line alpha beta gamma\n"; out = ""; while (length(out) < 9000) out = out s; printf "%s", substr(out, 1, 9000) }' > "$CROSS/src/dict_data.bin"
+    printf '\x08\x03\x05\x01a\x03\x01\x05\x01b\x05\x03two\x05\x01c\x00' > "$CROSS/src/structured.bin"
   fi
-  : > "$CROSS/src/empty.bin"
-  dd if=/dev/urandom of="$CROSS/src/payload.bin" bs=1024 count=8 status=none
-  dd if=/dev/urandom of="$CROSS/src/base.bin" bs=1024 count=4 status=none
-  cp "$CROSS/src/base.bin" "$CROSS/src/target.bin"
-  printf 'INSERTED-REVISION-2' | dd of="$CROSS/src/target.bin" bs=1 seek=100 conv=notrunc status=none
-  printf 'REPLACED-BLOCK' | dd of="$CROSS/src/target.bin" bs=1 seek=700 conv=notrunc status=none
-  awk 'BEGIN { s = "weft codec dictionary line alpha beta gamma\n"; out = ""; while (length(out) < 1024) out = out s; printf "%s", substr(out, 1, 1024) }' > "$CROSS/src/dict.bin"
-  awk 'BEGIN { s = "weft codec dictionary line alpha beta gamma\n"; out = ""; while (length(out) < 9000) out = out s; printf "%s", substr(out, 1, 9000) }' > "$CROSS/src/dict_data.bin"
-  printf '\x08\x03\x05\x01a\x03\x01\x05\x01b\x05\x03two\x05\x01c\x00' > "$CROSS/src/structured.bin"
+  # AI-mode fixtures: a 24-byte f32 2x3 tensor and the token sequence
+  # [1,2,3]. The canonical token payload is 01 02 02 (absolute 1, then two
+  # +1 zigzag deltas).
+  head -c 24 "$CROSS/src/payload.bin" > "$CROSS/src/tensor.bin"
+  printf '{"vocab_schema":"weft.test.vocab.v1","token_ids":[1,2,3]}' > "$CROSS/src/tokens.json"
+  printf '\x01\x02\x02' > "$CROSS/src/tokens_payload.bin"
 }
 
 dep_hash() {
@@ -41,7 +46,7 @@ dep_hash() {
 }
 
 frame_modes() {
-  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured
+  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens
 }
 
 original_for() {
@@ -52,6 +57,8 @@ original_for() {
     delta) echo target.bin ;;
     dictionary) echo dict_data.bin ;;
     structured) echo structured.bin ;;
+    tensor) echo tensor.bin ;;
+    tokens) echo tokens_payload.bin ;;
     *) echo "unknown mode $1" >&2; return 1 ;;
   esac
 }
@@ -67,6 +74,8 @@ rust_gen() {
   "$RUST" encode --input "$CROSS/src/target.bin" --output "$CROSS/rust/delta.wft1" --mode delta --base "$CROSS/src/base.bin"
   "$RUST" encode --input "$CROSS/src/dict_data.bin" --output "$CROSS/rust/dictionary.wft1" --mode dictionary --dict "$CROSS/src/dict.bin" --level 3
   "$RUST" encode --input "$CROSS/src/structured.bin" --output "$CROSS/rust/structured.wft1" --mode structured
+  "$RUST" encode --input "$CROSS/src/tensor.bin" --output "$CROSS/rust/tensor.wft1" --mode tensor --dtype f32 --shape 2,3
+  "$RUST" encode --input "$CROSS/src/tokens.json" --output "$CROSS/rust/tokens.wft1" --mode tokens
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/reference.wft1" "$RUST")"
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/delta.wft1" "$RUST")"
   cp "$CROSS/src/dict.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/dictionary.wft1" "$RUST")"
@@ -89,6 +98,8 @@ go_gen() {
   "$GO" encode --input "$CROSS/src/target.bin" --output "$CROSS/go/delta.wft1" --mode delta --base "$CROSS/src/base.bin"
   "$GO" encode --input "$CROSS/src/dict_data.bin" --output "$CROSS/go/dictionary.wft1" --mode dictionary --dict "$CROSS/src/dict.bin" --level 3
   "$GO" encode --input "$CROSS/src/structured.bin" --output "$CROSS/go/structured.wft1" --mode structured
+  "$GO" encode --input "$CROSS/src/tensor.bin" --output "$CROSS/go/tensor.wft1" --mode tensor --dtype f32 --shape 2,3
+  "$GO" encode --input "$CROSS/src/tokens.json" --output "$CROSS/go/tokens.wft1" --mode tokens
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/reference.wft1" "$GO")"
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/delta.wft1" "$GO")"
   cp "$CROSS/src/dict.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/dictionary.wft1" "$GO")"
@@ -137,7 +148,7 @@ compare() {
   done
 
   echo "== deterministic frame bytes (Go == Rust) =="
-  for mode in raw raw_empty raw_chunked reference delta structured; do
+  for mode in raw raw_empty raw_chunked reference delta structured tensor tokens; do
     if cmp -s "$CROSS/rust/$mode.wft1" "$CROSS/go/$mode.wft1"; then
       echo "PASS identical $mode"
     else

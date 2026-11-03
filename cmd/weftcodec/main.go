@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -71,6 +72,8 @@ func usage() {
 
 usage:
   weftcodec encode --input FILE --output FILE [--mode MODE] [--base FILE] [--dict FILE] [--level N] [--chunk-size N]
+  weftcodec encode --mode tensor --input PAYLOAD --dtype D --shape 2,3 | --metadata FILE
+  weftcodec encode --mode tokens --input TOKENS.json
   weftcodec decode --input FILE --output FILE [--deps DIR]
   weftcodec inspect FILE [--json]
   weftcodec verify FILE [--deps DIR]
@@ -88,11 +91,14 @@ func runEncode(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("encode", flag.ContinueOnError)
 	input := fs.String("input", "", "input path or - for stdin")
 	output := fs.String("output", "", "output path or - for stdout")
-	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|auto")
+	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|auto")
 	basePath := fs.String("base", "", "base bytes for reference/delta/auto")
 	dictPath := fs.String("dict", "", "raw-content zstd dictionary for dictionary/auto")
 	level := fs.Int("level", 3, "zstd level")
 	chunkSize := fs.Int("chunk-size", 0, "chunk size in bytes (RAW and ZSTD only)")
+	dtype := fs.String("dtype", "", "TENSOR dtype (f16|bf16|f32|f64|i8|u8|i16|i32|i64)")
+	shape := fs.String("shape", "", "TENSOR shape as comma-separated u64 extents")
+	metadata := fs.String("metadata", "", "TENSOR metadata JSON file")
 	if err := fs.Parse(args); err != nil {
 		return werrors.NewParse(err.Error())
 	}
@@ -119,9 +125,14 @@ func runEncode(ctx context.Context, args []string) error {
 	}
 
 	var encoded []byte
-	if *modeName == "auto" {
+	switch *modeName {
+	case "tensor":
+		encoded, err = encodeTensor(data, *dtype, *shape, *metadata, lim)
+	case "tokens":
+		encoded, err = encodeTokens(data, lim)
+	case "auto":
 		encoded, err = encodeAuto(data, base, dict, *level, *chunkSize, lim)
-	} else {
+	default:
 		mode, modeErr := frame.ModeFromName(*modeName)
 		if modeErr != nil {
 			return modeErr
@@ -132,6 +143,73 @@ func runEncode(ctx context.Context, args []string) error {
 		return err
 	}
 	return writeOutput(*output, encoded)
+}
+
+type tensorMetaInput struct {
+	Dtype      string   `json:"dtype"`
+	Shape      []uint64 `json:"shape"`
+	Layout     string   `json:"layout"`
+	Endianness string   `json:"endianness"`
+}
+
+type tokensInput struct {
+	VocabSchema string   `json:"vocab_schema"`
+	TokenIDs    []uint64 `json:"token_ids"`
+}
+
+func encodeTensor(payload []byte, dtype, shapeText, metadataPath string, lim limits.Limits) ([]byte, error) {
+	shape := []uint64{}
+	if metadataPath != "" {
+		if dtype != "" || shapeText != "" {
+			return nil, werrors.NewMalformed(
+				"--metadata cannot be combined with --dtype or --shape")
+		}
+		raw, err := readLimited(metadataPath, lim.MaxStringBytes)
+		if err != nil {
+			return nil, err
+		}
+		var input tensorMetaInput
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, werrors.Malformedf(
+				"tensor metadata must be JSON {\"dtype\":string,\"shape\":[u64,...]}: %v", err)
+		}
+		if input.Layout != "" && input.Layout != "row_major" {
+			return nil, werrors.Malformedf(
+				"tensor layout %q is specified but not implemented in v1 (only row_major)",
+				input.Layout)
+		}
+		if input.Endianness != "" && input.Endianness != "little" {
+			return nil, werrors.Malformedf(
+				"tensor endianness %q is specified but not implemented in v1 (only little)",
+				input.Endianness)
+		}
+		dtype = input.Dtype
+		shape = input.Shape
+	} else {
+		if dtype == "" {
+			return nil, werrors.NewMalformed(
+				"TENSOR encoding requires --dtype or --metadata")
+		}
+		if shapeText != "" {
+			for _, part := range strings.Split(shapeText, ",") {
+				value, err := strconv.ParseUint(strings.TrimSpace(part), 10, 64)
+				if err != nil {
+					return nil, werrors.Malformedf("bad --shape extent %q: %v", part, err)
+				}
+				shape = append(shape, value)
+			}
+		}
+	}
+	return modes.EncodeTensor(payload, dtype, shape, lim)
+}
+
+func encodeTokens(data []byte, lim limits.Limits) ([]byte, error) {
+	var input tokensInput
+	if err := json.Unmarshal(data, &input); err != nil {
+		return nil, werrors.Malformedf(
+			"tokens input must be JSON {\"vocab_schema\":string,\"token_ids\":[u64,...]}: %v", err)
+	}
+	return modes.EncodeTokens(input.TokenIDs, input.VocabSchema, lim)
 }
 
 func encodeMode(mode frame.Mode, data, base, dict []byte, level, chunkSize int, lim limits.Limits) ([]byte, error) {
@@ -161,6 +239,12 @@ func encodeMode(mode frame.Mode, data, base, dict []byte, level, chunkSize int, 
 			return nil, err
 		}
 		return modes.EncodeStructured(value, lim)
+	case frame.ModeTensor:
+		return nil, werrors.NewMalformed(
+			"TENSOR encoding requires --dtype/--shape or --metadata")
+	case frame.ModeTokenSequence:
+		return nil, werrors.NewMalformed(
+			"TOKEN_SEQUENCE encoding requires a JSON token input")
 	default:
 		return nil, werrors.UnsupportedModef("unknown mode %s", mode)
 	}

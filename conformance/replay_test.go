@@ -84,6 +84,7 @@ type codecVector struct {
 	Dependencies  []depVector       `json:"dependencies"`
 	Expect        expectation       `json:"expect"`
 	Limits        map[string]uint64 `json:"limits"`
+	SupersededBy  string            `json:"superseded_by"`
 }
 
 func limitsFrom(m map[string]uint64) limits.Limits {
@@ -112,6 +113,12 @@ func limitsFrom(m map[string]uint64) limits.Limits {
 			lim.MaxStringBytes = value
 		case "max_delta_ops":
 			lim.MaxDeltaOps = value
+		case "max_tensor_elements":
+			lim.MaxTensorElements = value
+		case "max_tensor_rank":
+			lim.MaxTensorRank = value
+		case "max_tokens":
+			lim.MaxTokens = value
 		case "max_selector_bytes":
 			lim.MaxSelectorBytes = value
 		case "max_selector_depth":
@@ -155,6 +162,9 @@ func TestCodecVectors(t *testing.T) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			var vector codecVector
 			loadJSON(t, path, &vector)
+			if vector.SupersededBy != "" {
+				t.Skipf("superseded by %s", vector.SupersededBy)
+			}
 			frameBytes := mustHex(t, "frame", vector.FrameHex)
 			lim := limitsFrom(vector.Limits)
 			resolver := resolverFor(t, vector.Dependencies)
@@ -327,6 +337,11 @@ func TestMetadataByteEquality(t *testing.T) {
 		"009_reference_equal",
 		"010_delta_edits",
 		"012_structured_map",
+		"100_tensor_f32_2x3",
+		"101_tensor_f16_scalar",
+		"102_tensor_u8_zero_element",
+		"103_tokens_delta_boundaries",
+		"104_tokens_empty",
 	}
 	for _, name := range cases {
 		name := name
@@ -335,6 +350,7 @@ func TestMetadataByteEquality(t *testing.T) {
 			var vector codecVector
 			loadJSON(t, path, &vector)
 			plaintext := mustHex(t, "plaintext", vector.PlaintextHex)
+			want := mustHex(t, "frame", vector.FrameHex)
 			var encoded []byte
 			var err error
 			switch vector.Mode {
@@ -363,13 +379,36 @@ func TestMetadataByteEquality(t *testing.T) {
 					t.Fatalf("structured body: %v", decodeErr)
 				}
 				encoded, err = modes.EncodeStructured(value, lim)
+			case "tensor":
+				parsed, parseErr := frame.Parse(want, lim)
+				if parseErr != nil {
+					t.Fatalf("parse: %v", parseErr)
+				}
+				meta, metaErr := modes.TensorMetadata(parsed, lim)
+				if metaErr != nil {
+					t.Fatalf("metadata: %v", metaErr)
+				}
+				encoded, err = modes.EncodeTensor(plaintext, meta.Dtype, meta.Shape, lim)
+			case "tokens":
+				parsed, parseErr := frame.Parse(want, lim)
+				if parseErr != nil {
+					t.Fatalf("parse: %v", parseErr)
+				}
+				meta, metaErr := modes.TokenMetadata(parsed, lim)
+				if metaErr != nil {
+					t.Fatalf("metadata: %v", metaErr)
+				}
+				ids, idsErr := modes.DecodeTokenPayload(plaintext, meta.TokenCount, lim)
+				if idsErr != nil {
+					t.Fatalf("token ids: %v", idsErr)
+				}
+				encoded, err = modes.EncodeTokens(ids, meta.VocabSchema, lim)
 			default:
 				t.Skipf("mode %s is not byte-deterministic", vector.Mode)
 			}
 			if err != nil {
 				t.Fatalf("encode failed: %v", err)
 			}
-			want := mustHex(t, "frame", vector.FrameHex)
 			if !bytes.Equal(encoded, want) {
 				t.Fatalf("frame bytes differ for %s:\n got %s\nwant %s",
 					name, hex.EncodeToString(encoded), vector.FrameHex)

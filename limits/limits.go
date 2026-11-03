@@ -23,6 +23,9 @@ const (
 	DefaultMaxStructuredItems   uint64 = 1_000_000
 	DefaultMaxStringBytes       uint64 = 256 << 20
 	DefaultMaxDeltaOps          uint64 = 16_777_216
+	DefaultMaxTensorElements    uint64 = 1 << 32
+	DefaultMaxTensorRank        uint64 = 8
+	DefaultMaxTokens            uint64 = 1 << 24
 	DefaultMaxSelectorBytes     uint64 = 64 << 10
 	DefaultMaxSelectorDepth     uint64 = 64
 	DefaultMaxFieldSegments     uint64 = 16
@@ -46,6 +49,9 @@ type Limits struct {
 	MaxStructuredItems   uint64
 	MaxStringBytes       uint64
 	MaxDeltaOps          uint64
+	MaxTensorElements    uint64
+	MaxTensorRank        uint64
+	MaxTokens            uint64
 	MaxSelectorBytes     uint64
 	MaxSelectorDepth     uint64
 	MaxFieldSegments     uint64
@@ -70,6 +76,9 @@ func Default() Limits {
 		MaxStructuredItems:   DefaultMaxStructuredItems,
 		MaxStringBytes:       DefaultMaxStringBytes,
 		MaxDeltaOps:          DefaultMaxDeltaOps,
+		MaxTensorElements:    DefaultMaxTensorElements,
+		MaxTensorRank:        DefaultMaxTensorRank,
+		MaxTokens:            DefaultMaxTokens,
 		MaxSelectorBytes:     DefaultMaxSelectorBytes,
 		MaxSelectorDepth:     DefaultMaxSelectorDepth,
 		MaxFieldSegments:     DefaultMaxFieldSegments,

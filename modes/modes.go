@@ -211,6 +211,10 @@ func DecodeBytes(ctx context.Context, frameBytes []byte, resolver dependency.Res
 		if _, err = wcb.Decode(f.Body, lim); err == nil {
 			plaintext = append([]byte(nil), f.Body...)
 		}
+	case frame.ModeTensor:
+		plaintext, err = DecodeTensorFrame(f, lim)
+	case frame.ModeTokenSequence:
+		plaintext, err = DecodeTokensFrame(f, lim)
 	default:
 		err = werrors.UnsupportedModef("mode %d is not decodable", f.Header.Mode)
 	}

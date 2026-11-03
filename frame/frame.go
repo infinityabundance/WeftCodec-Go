@@ -77,6 +77,10 @@ const (
 	ModeDelta      Mode = 3
 	ModeDictionary Mode = 4
 	ModeStructured Mode = 5
+	// ModeTensor is the canonical tensor mode (WEFT-AI-CODEC §2).
+	ModeTensor Mode = 6
+	// ModeTokenSequence is the token-id sequence mode (WEFT-AI-CODEC §3).
+	ModeTokenSequence Mode = 7
 )
 
 // String returns the lowercase mode name.
@@ -94,6 +98,10 @@ func (m Mode) String() string {
 		return "dictionary"
 	case ModeStructured:
 		return "structured"
+	case ModeTensor:
+		return "tensor"
+	case ModeTokenSequence:
+		return "tokens"
 	default:
 		return fmt.Sprintf("mode(%d)", uint8(m))
 	}
@@ -102,7 +110,7 @@ func (m Mode) String() string {
 // ModeFromU8 validates a wire mode value.
 func ModeFromU8(v uint8) (Mode, error) {
 	switch {
-	case v <= 5:
+	case v <= 7:
 		return Mode(v), nil
 	case v <= 127:
 		return 0, werrors.UnsupportedModef("reserved mode %d is not defined in v1", v)
@@ -126,6 +134,10 @@ func ModeFromName(name string) (Mode, error) {
 		return ModeDictionary, nil
 	case "structured":
 		return ModeStructured, nil
+	case "tensor":
+		return ModeTensor, nil
+	case "tokens", "token_sequence":
+		return ModeTokenSequence, nil
 	default:
 		return 0, werrors.UnsupportedModef("unknown mode %q", name)
 	}
@@ -683,6 +695,26 @@ func validateModeRules(h Header, deps []Dependency, lim limits.Limits) error {
 		}
 		if h.ChunkCount != 0 {
 			return werrors.NewMalformed("DELTA must not be chunked")
+		}
+	case ModeTensor, ModeTokenSequence:
+		if h.Domain != DomainPayload {
+			return werrors.NewMalformed(
+				"TENSOR/TOKEN_SEQUENCE frames must use the payload domain")
+		}
+		if dictFlag {
+			return werrors.NewMalformed("DICT_RAW is only valid for DICTIONARY")
+		}
+		if h.DepCount != 0 {
+			return werrors.NewMalformed(
+				"TENSOR/TOKEN_SEQUENCE frames must not have dependencies in v1")
+		}
+		if h.ChunkCount != 0 {
+			return werrors.NewMalformed(
+				"TENSOR/TOKEN_SEQUENCE frames must not be chunked")
+		}
+		if h.BodyLen < 4 {
+			return werrors.NewMalformed(
+				"TENSOR/TOKEN_SEQUENCE body is shorter than its 4-byte metadata length")
 		}
 	case ModeDictionary:
 		if h.Domain != DomainPayload {

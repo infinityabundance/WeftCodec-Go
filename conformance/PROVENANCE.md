@@ -42,3 +42,27 @@ causal files are 4 canonical records plus 6 rejection vectors. The Go tests
 replay them without modification. Existing `codec/`, `structured/`, and
 `selectors/` vectors were **not** regenerated or changed; their provenance above
 still applies.
+
+---
+
+## F6 AI-mode vectors (append-only addition)
+
+- Source repository: `https://github.com/infinityabundance/WeftCodec`
+- Source commit: `c632aa103509e601d916ef57230e6dc7d74fdb5f` (`staging`)
+- Copy date: 2026-11-03
+- Files copied: 20 new `codec/` vectors:
+  - valid: `100_tensor_f32_2x3`, `101_tensor_f16_scalar`,
+    `102_tensor_u8_zero_element`, `103_tokens_delta_boundaries`,
+    `104_tokens_empty`;
+  - rejects: `120`–`127` (tensor) and `130`–`135` (tokens);
+  - `017_unknown_mode_reserved8` (mode 8 remains reserved).
+- Aggregate SHA-256 over `sha256sum` lines of those 20 files, sorted with
+  `LC_ALL=C sort`:
+  `9025a7fd1d889d1ab8071ab2701e23a453f5e251cf5037f3f84f806d6711ffae`
+- `conformance/README.md` SHA-256:
+  `ef9cb9c0d3c9a08412005861cffd624d02db981a4c56e9cf1eb95a9555a6d07a`
+
+The historical `017_unknown_mode.json` is retained byte-for-byte with an added
+`superseded_by` marker; the Go replay suite skips superseded vectors. All
+previously committed vectors keep their original bytes. The Go suite asserts
+byte-identical re-encoding for the five valid AI vectors.

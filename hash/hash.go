@@ -35,6 +35,9 @@ const (
 	DomainContextRoot = "weft/context-root/v1"
 	DomainCausal      = "weft/causal/v1"
 	DomainCapability  = "weft/capability/v1"
+	// Tensor/Token payload bindings (WEFT-AI-CODEC §2-§3).
+	DomainTensorPayload = "weft/tensor/payload/v1"
+	DomainTokensPayload = "weft/tokens/payload/v1"
 )
 
 // Hash32 is a 32-byte Weft digest. It is comparable and ordered
