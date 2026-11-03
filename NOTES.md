@@ -530,3 +530,46 @@ them.
   identical classes in both implementations.
 - Limits remain enforced before allocation; the Go zstd path already streamed,
   and the shared 4 GiB-declared vector returns `Corrupt` at ~4.7 MiB RSS.
+
+---
+
+## F6 — independent Go TENSOR (6) and TOKEN_SEQUENCE (7), 2026-11-03
+
+The earlier "AI codec modes: specified, not implemented" line is historical.
+F6 implements both allocated modes with no Rust calls, FFI, or code sharing:
+
+- `modes.EncodeTensor` / `DecodeTensorFrame`: canonical WCB descriptor,
+  dtype/size table, checked shape product, zero-element and scalar support,
+  `weft/tensor/payload/v1` binding.
+- `modes.EncodeTokens` / `DecodeTokensFrame`: `u64-zigzag-delta-leb128`
+  payload, wrapping 64-bit deltas, minimal LEB128, exact count and trailing
+  checks, `weft/tokens/payload/v1` binding.
+- `frame.ModeTensor = 6`, `frame.ModeTokenSequence = 7`; mode 8 remains
+  reserved and is rejected as `UnsupportedMode`.
+- New limits: `MaxTensorElements` (2^32), `MaxTensorRank` (8), `MaxTokens`
+  (2^24).
+- CLI: `--mode tensor` with `--dtype`/`--shape` or `--metadata`; `--mode
+  tokens` with the JSON input form.
+
+Verification in the Go court:
+
+```
+$ scripts/docker-court.sh go "cd WeftCodec-Go && GOTMPDIR=/work/.docker-cache/go-tmp GOFLAGS=-buildvcs=false go test ./..."
+# 57 top-level PASS tests, including modes/ai_test.go (8 tests)
+$ scripts/docker-court.sh go "cd WeftCodec-Go && ... go vet ./... && CGO_ENABLED=0 ... go build ./..."
+# pass
+```
+
+All 49 codec vectors replay, including the 20 F6 vectors. `TestMetadataByteEquality`
+asserts byte-identical re-encoding for the five valid AI vectors. The
+cross-language fixture matrix gained `tensor` and `tokens`:
+
+```
+PASS rust->go tensor / tokens
+PASS go->rust tensor / tokens
+PASS identical tensor / tokens
+```
+
+`017_unknown_mode` is skipped via `superseded_by`; the current reserved-value
+vector is mode 8. Provenance: `conformance/PROVENANCE.md` F6 section, source
+commit `c632aa103509e601d916ef57230e6dc7d74fdb5f`.

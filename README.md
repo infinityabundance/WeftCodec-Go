@@ -15,17 +15,18 @@ decodes.
 Honest status as of 2026-11-03 on branch `staging`:
 
 - Implemented: 96-byte header, 48-byte dependency and chunk entries, header and
-  trailer CRC32C, minimal LEB128, all six modes (RAW, ZSTD, REFERENCE, DELTA,
-  DICTIONARY, STRUCTURED), chunked RAW/ZSTD, dependency DAG resolution with
-  cycle/depth/fetch limits, WFA1 archives, WCB canonicalization, WeftQL parsing
-  and `SelectorId`, and the CLI.
-- Conformance: all 71 frozen Rust vectors replay (29 codec, 20 structured, 22
-  selectors). Byte-identical re-encoding is asserted for RAW (chunked and
-  unchunked), REFERENCE, DELTA, and STRUCTURED.
-- Cross-language: all 8 fixture modes pass Rust→Go and Go→Rust decode
+  trailer CRC32C, minimal LEB128, all eight modes (RAW, ZSTD, REFERENCE, DELTA,
+  DICTIONARY, STRUCTURED, TENSOR, TOKEN_SEQUENCE), chunked RAW/ZSTD, dependency
+  DAG resolution with cycle/depth/fetch limits, WFA1 archives, WCB
+  canonicalization, WeftQL parsing and `SelectorId`, and the CLI.
+- Conformance: all 117 frozen Rust vectors replay (49 codec, 20 structured, 22
+  selectors, 16 context, 10 causal). Byte-identical re-encoding is asserted for
+  RAW (chunked and unchunked), REFERENCE, DELTA, STRUCTURED, TENSOR, and TOKENS.
+- Cross-language: all 10 fixture modes pass Rust→Go and Go→Rust decode
   equivalence. Go uses `github.com/klauspost/compress/zstd`; its ZSTD and
   DICTIONARY frame bytes differ from Rust's as permitted by spec §12, but both
-  directions decode exactly.
+  directions decode exactly. TENSOR and TOKENS frames are byte-identical.
+- **57 top-level tests pass**, including the 20 new AI-mode vectors.
 - Not run: fuzzing campaigns, benchmarks, or crash-injection courts. No
   performance claims are made.
 
@@ -40,7 +41,7 @@ full command/output verification record.
 | `varint` | Minimal LEB128, zigzag |
 | `wcb` | Weft Canonical Bytes encode/decode and canonical validation |
 | `frame` | WFT1 header/tables/trailer encode/parse, CRCs, `io.Reader` frame reads |
-| `modes` | RAW/ZSTD/REFERENCE/DELTA/DICTIONARY/STRUCTURED, chunk decode, DAG decode |
+| `modes` | RAW/ZSTD/REFERENCE/DELTA/DICTIONARY/STRUCTURED/TENSOR/TOKEN_SEQUENCE, chunk decode, DAG decode |
 | `dependency` | `Resolver`, `MapResolver`, `DirectoryResolver`, `FrameSource` |
 | `archive` | WFA1 create/parse/decode with deterministic topological ordering |
 | `selector` | WeftQL lexer/parser, normalization, canonical WCB, `SelectorId` |
@@ -117,8 +118,9 @@ scripts/docker-court.sh go "cd WeftCodec-Go && bash hack/cross.sh compare"
 ```
 
 Fixture modes: `raw`, empty RAW, chunked RAW, `zstd`, `reference`, `delta`,
-`dictionary`, and `structured`. The observed matrix is recorded in
-`NOTES.md`; all checks pass.
+`dictionary`, `structured`, `tensor`, and `tokens`. The observed matrix is
+recorded in `NOTES.md`; all checks pass, and the TENSOR/TOKENS frames are
+byte-identical in both directions.
 
 ## Conformance corpus
 
