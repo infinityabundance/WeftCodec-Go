@@ -13,9 +13,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/infinityabundance/WeftCodec-Go/archive"
+	weftcontext "github.com/infinityabundance/WeftCodec-Go/context"
 	"github.com/infinityabundance/WeftCodec-Go/dependency"
 	"github.com/infinityabundance/WeftCodec-Go/frame"
 	"github.com/infinityabundance/WeftCodec-Go/hash"
@@ -46,6 +48,10 @@ func main() {
 		err = runArchive(ctx, os.Args[2:])
 	case "selector":
 		err = runSelector(os.Args[2:])
+	case "context":
+		err = runContext(os.Args[2:])
+	case "causal":
+		err = runCausal(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -71,7 +77,11 @@ usage:
   weftcodec archive create --output FILE FRAME...
   weftcodec archive decode --input FILE --out-dir DIR
   weftcodec selector id --input FILE [--json]
-  weftcodec selector canonicalize --input FILE`)
+  weftcodec selector canonicalize --input FILE
+  weftcodec context id --selector FILE|- --namespace N --snapshot HEX [--causal HEX,...] [--resolver R] [--capability-hash HEX] [--budget K=V,...] [--json]
+  weftcodec context uri --selector FILE|- --namespace N --snapshot HEX [--descriptor] [--json]
+  weftcodec context parse weft://... [--json]
+  weftcodec causal id --parents HEX,... [--json]`)
 }
 
 func runEncode(ctx context.Context, args []string) error {
@@ -509,6 +519,364 @@ func runSelector(args []string) error {
 	default:
 		return werrors.NewParse("selector requires id or canonicalize")
 	}
+}
+
+func runContext(args []string) error {
+	if len(args) < 1 {
+		return werrors.NewParse("context requires id, uri, or parse")
+	}
+	switch args[0] {
+	case "id":
+		return runContextID(args[1:])
+	case "uri":
+		return runContextURI(args[1:])
+	case "parse":
+		return runContextParse(args[1:])
+	default:
+		return werrors.NewParse("context requires id, uri, or parse")
+	}
+}
+
+type contextOptions struct {
+	selector       string
+	namespace      string
+	snapshot       string
+	causal         string
+	resolver       string
+	capabilityHash string
+	budget         string
+	asJSON         bool
+}
+
+func parseContextFlags(name string, args []string) (contextOptions, error) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	opts := contextOptions{}
+	fs.StringVar(&opts.selector, "selector", "", "selector source file or - for stdin")
+	fs.StringVar(&opts.namespace, "namespace", "", "namespace")
+	fs.StringVar(&opts.snapshot, "snapshot", "", "pinned snapshot hash")
+	fs.StringVar(&opts.causal, "causal", "", "comma-separated causal entries")
+	fs.StringVar(&opts.resolver, "resolver", weftcontext.DefaultResolver, "resolver version")
+	fs.StringVar(&opts.capabilityHash, "capability-hash", "", "capability scope hash")
+	fs.StringVar(&opts.budget, "budget", "", "budget K=V,...")
+	fs.BoolVar(&opts.asJSON, "json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return opts, werrors.NewParse(err.Error())
+	}
+	if opts.selector == "" {
+		return opts, werrors.NewParse("context requires --selector")
+	}
+	if opts.namespace == "" {
+		return opts, werrors.NewParse("context requires --namespace")
+	}
+	if opts.snapshot == "" {
+		return opts, werrors.NewParse("context requires --snapshot")
+	}
+	return opts, nil
+}
+
+func (o contextOptions) load() (*weftcontext.ContextRoot, string, error) {
+	b, err := readLimited(o.selector, limits.Default().MaxSelectorBytes)
+	if err != nil {
+		return nil, "", err
+	}
+	if !utf8.Valid(b) {
+		return nil, "", werrors.NewParse("selector input is not valid UTF-8")
+	}
+	source := string(b)
+	causal, err := parseHashList(o.causal, "causal closure")
+	if err != nil {
+		return nil, "", err
+	}
+	capability, err := optionalHash(o.capabilityHash, "capability hash")
+	if err != nil {
+		return nil, "", err
+	}
+	var budget *weftcontext.Budget
+	if o.budget != "" {
+		budget, err = weftcontext.ParseBudget(o.budget)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	root, err := weftcontext.BuildContextRoot(
+		source, o.namespace, o.snapshot, o.resolver, causal, capability, budget)
+	if err != nil {
+		return nil, "", err
+	}
+	return root, source, nil
+}
+
+func parseHashList(text, what string) ([]hash.Hash32, error) {
+	if text == "" {
+		return nil, nil
+	}
+	var hashes []hash.Hash32
+	for _, entry := range strings.Split(text, ",") {
+		if entry == "" {
+			return nil, werrors.NewParse(what + " contains an empty entry")
+		}
+		h, err := hash.FromHex(entry)
+		if err != nil {
+			return nil, werrors.NewParse(what + " entry: " + err.Error())
+		}
+		if h == hash.Zero {
+			return nil, werrors.NewParse(what + " entry must not be all zero")
+		}
+		hashes = append(hashes, h)
+	}
+	return hashes, nil
+}
+
+func optionalHash(text, what string) (*hash.Hash32, error) {
+	if text == "" {
+		return nil, nil
+	}
+	h, err := hash.FromHex(text)
+	if err != nil {
+		return nil, werrors.NewParse(what + ": " + err.Error())
+	}
+	if h == hash.Zero {
+		return nil, werrors.NewParse(what + " must not be all zero")
+	}
+	return &h, nil
+}
+
+func contextJSON(root *weftcontext.ContextRoot) (map[string]any, error) {
+	id, err := root.ID()
+	if err != nil {
+		return nil, err
+	}
+	uri, err := root.AuthoritativeURI()
+	if err != nil {
+		return nil, err
+	}
+	canonical, err := root.CanonicalHex(limits.Default())
+	if err != nil {
+		return nil, err
+	}
+	causal := make([]string, 0, len(root.Causal))
+	for _, h := range root.Causal {
+		causal = append(causal, h.Hex())
+	}
+	var capability any
+	if root.CapabilityHash != nil {
+		capability = root.CapabilityHash.Hex()
+	}
+	return map[string]any{
+		"schema":                 weftcontext.ContextRootSchema,
+		"namespace":              root.Namespace,
+		"selector_id":            root.SelectorID.Hex(),
+		"selector_canonical_hex": hex.EncodeToString(root.SelectorBytes),
+		"snapshot":               root.Snapshot.Hex(),
+		"resolver":               root.Resolver,
+		"causal":                 causal,
+		"ordering":               root.Ordering,
+		"capability_hash":        capability,
+		"budget":                 root.Budget.JSON(),
+		"context_root_id":        id.Hex(),
+		"uri":                    uri,
+		"canonical_hex":          canonical,
+	}, nil
+}
+
+func printJSON(value any) error {
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return werrors.NewIo("cannot serialize JSON: " + err.Error())
+	}
+	fmt.Println(string(encoded))
+	return nil
+}
+
+func runContextID(args []string) error {
+	opts, err := parseContextFlags("context id", args)
+	if err != nil {
+		return err
+	}
+	root, _, err := opts.load()
+	if err != nil {
+		return err
+	}
+	if opts.asJSON {
+		output, err := contextJSON(root)
+		if err != nil {
+			return err
+		}
+		return printJSON(output)
+	}
+	id, err := root.ID()
+	if err != nil {
+		return err
+	}
+	fmt.Println(id.Hex())
+	return nil
+}
+
+func runContextURI(args []string) error {
+	descriptor := false
+	filtered := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--descriptor" {
+			descriptor = true
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	opts, err := parseContextFlags("context uri", filtered)
+	if err != nil {
+		return err
+	}
+	root, source, err := opts.load()
+	if err != nil {
+		return err
+	}
+	if descriptor {
+		uri, err := root.DescriptorURI(source)
+		if err != nil {
+			return err
+		}
+		if opts.asJSON {
+			canonical, err := root.AuthoritativeURI()
+			if err != nil {
+				return err
+			}
+			id, err := root.ID()
+			if err != nil {
+				return err
+			}
+			return printJSON(map[string]any{
+				"uri":             uri,
+				"context_root_id": id.Hex(),
+				"descriptor":      uri,
+				"canonical_uri":   canonical,
+			})
+		}
+		fmt.Println(uri)
+		return nil
+	}
+	uri, err := root.AuthoritativeURI()
+	if err != nil {
+		return err
+	}
+	if opts.asJSON {
+		id, err := root.ID()
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{
+			"uri":             uri,
+			"context_root_id": id.Hex(),
+		})
+	}
+	fmt.Println(uri)
+	return nil
+}
+
+func runContextParse(args []string) error {
+	asJSON := false
+	positional := make([]string, 0, len(args))
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			asJSON = true
+		case "-h", "--help":
+			return werrors.NewParse("usage: weftcodec context parse weft://... [--json]")
+		default:
+			positional = append(positional, arg)
+		}
+	}
+	if len(positional) != 1 {
+		return werrors.NewParse("context parse requires exactly one URI")
+	}
+	lim := limits.Default()
+	parsed, err := weftcontext.ParseContextURI(positional[0], lim)
+	if err != nil {
+		return err
+	}
+	canonical, err := parsed.CanonicalURI(lim)
+	if err != nil {
+		return err
+	}
+	if parsed.Form == weftcontext.FormAuthoritative {
+		if asJSON {
+			return printJSON(map[string]any{
+				"form":            "authoritative",
+				"namespace":       parsed.Namespace,
+				"context_root_id": parsed.ID.Hex(),
+				"uri":             canonical,
+			})
+		}
+		fmt.Println(canonical)
+		return nil
+	}
+	root, err := parsed.ToContextRoot(lim)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		output, err := contextJSON(root)
+		if err != nil {
+			return err
+		}
+		output["form"] = "descriptor"
+		output["namespace"] = parsed.Namespace
+		output["selector_source"] = parsed.SelectorSource
+		output["descriptor"] = positional[0]
+		output["uri"] = canonical
+		return printJSON(output)
+	}
+	fmt.Println(canonical)
+	return nil
+}
+
+func runCausal(args []string) error {
+	if len(args) < 1 || args[0] != "id" {
+		return werrors.NewParse("causal requires id")
+	}
+	fs := flag.NewFlagSet("causal id", flag.ContinueOnError)
+	parentsText := fs.String("parents", "", "comma-separated explicit parents")
+	asJSON := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args[1:]); err != nil {
+		return werrors.NewParse(err.Error())
+	}
+	if *parentsText == "" {
+		return werrors.NewParse("causal id requires --parents")
+	}
+	parents, err := parseHashList(*parentsText, "causal parents")
+	if err != nil {
+		return err
+	}
+	closure, err := weftcontext.FromParents(parents)
+	if err != nil {
+		return err
+	}
+	id, err := closure.ID()
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		parentsHex := make([]string, 0, len(closure.Parents))
+		for _, h := range closure.Parents {
+			parentsHex = append(parentsHex, h.Hex())
+		}
+		closureHex := make([]string, 0, len(closure.Closure))
+		for _, h := range closure.Closure {
+			closureHex = append(closureHex, h.Hex())
+		}
+		canonical, err := closure.CanonicalBytes(limits.Default())
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{
+			"schema":        weftcontext.CausalSchema,
+			"parents":       parentsHex,
+			"closure":       closureHex,
+			"closure_hash":  id.Hex(),
+			"canonical_hex": hex.EncodeToString(canonical),
+		})
+	}
+	fmt.Println(id.Hex())
+	return nil
 }
 
 func resolverFor(dir string) dependency.Resolver {

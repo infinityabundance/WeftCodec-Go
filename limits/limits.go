@@ -28,6 +28,9 @@ const (
 	DefaultMaxFieldSegments     uint64 = 16
 	DefaultMaxSelectorOperands  uint64 = 4_096
 	DefaultMaxArchiveEntries    uint64 = 1_000_000
+	DefaultMaxCausalEntries     uint64 = 4_096
+	DefaultMaxCapabilityEntries uint64 = 4_096
+	DefaultMaxURIBytes          uint64 = 64 << 10
 )
 
 // Limits is a value type so it can be passed and copied cheaply.
@@ -48,6 +51,9 @@ type Limits struct {
 	MaxFieldSegments     uint64
 	MaxSelectorOperands  uint64
 	MaxArchiveEntries    uint64
+	MaxCausalEntries     uint64
+	MaxCapabilityEntries uint64
+	MaxURIBytes          uint64
 }
 
 // Default returns the normative v1 defaults.
@@ -69,6 +75,9 @@ func Default() Limits {
 		MaxFieldSegments:     DefaultMaxFieldSegments,
 		MaxSelectorOperands:  DefaultMaxSelectorOperands,
 		MaxArchiveEntries:    DefaultMaxArchiveEntries,
+		MaxCausalEntries:     DefaultMaxCausalEntries,
+		MaxCapabilityEntries: DefaultMaxCapabilityEntries,
+		MaxURIBytes:          DefaultMaxURIBytes,
 	}
 }
 

@@ -389,3 +389,127 @@ not edited. The conformance tests only read them.
   planner. It is deterministic and byte-compatible with Rust.
 - **No crash/durability court.** The codec is a pure byte transform; durability
   belongs to WeftFS.
+
+---
+
+## 6. F1 — Context Root, causal closure, and `weft://` (implemented)
+
+Status: **implemented and tested** for the data layer. Resolution, capability
+enforcement, and AI codec modes are not implemented (see §6.6).
+
+### 6.1 What is implemented
+
+- **`context` package**: `Budget`, `IdentityMode` semantics, `CausalClosure`
+  (`weft.causal.v1`), `CapabilityScope` (`weft.capability.v1`), `ContextRoot`
+  (`weft.context-root.v1`), authoritative and descriptor `weft://` parsing and
+  formatting.
+- Strict WCB: unknown keys, wrong types, unsorted/duplicate/zero closure
+  entries, missing parents, zero snapshot/capability hashes, empty/zero budgets,
+  unknown ordering policies, and selector-binding mismatches are rejected with
+  the classes in the spec.
+- Domain strings `weft/context-root/v1`, `weft/causal/v1`, `weft/capability/v1`
+  added to `hash`.
+- Limits `MaxCausalEntries` (4,096), `MaxCapabilityEntries` (4,096),
+  `MaxURIBytes` (64 KiB).
+- CLI verbs `context id`, `context uri [--descriptor]`, `context parse`,
+  `causal id`.
+- **Vectors**: a byte-for-byte copy of the Rust-produced
+  `conformance/v1/context/` (16 files) and `conformance/v1/causal/` (10 files),
+  replayed by `context/context_test.go`.
+
+### 6.2 Cross-language gate
+
+The exchanged vector is a descriptor URI (selector text + snapshot + closure +
+capability + budget). Each implementation must reproduce the other's
+`ContextRootId` and authoritative URI. No source is shared.
+
+```sh
+scripts/docker-court.sh rust "cd WeftCodec && cargo build --release --quiet && cd /work/WeftCodec-Go && bash hack/context-cross.sh rust-gen"
+# rust-gen: wrote 4 context cases and one causal case to
+#   /work/.docker-cache/context-cross/rust
+scripts/docker-court.sh go "cd WeftCodec-Go && bash hack/context-cross.sh go-build && bash hack/context-cross.sh go-gen && bash hack/context-cross.sh go-parse-rust"
+# go-build: wrote /work/.docker-cache/weftcodec-go
+# go-gen: wrote 4 context cases and one causal case
+# ... parsed 4 rust descriptors -> go-parsed
+scripts/docker-court.sh rust "cd /work/WeftCodec-Go && bash hack/context-cross.sh rust-parse-go"
+# ... parsed 4 go descriptors -> rust-parsed
+scripts/docker-court.sh go "cd WeftCodec-Go && bash hack/context-cross.sh compare"
+```
+
+Observed result (exact `compare` output):
+
+```
+== ContextRootId equality (id JSON) ==
+PASS id true 53f70ff51a49496af01dc87e7002fa7ef7fe1ab5c192bdb326d0868b1f01a41a
+PASS id filter 04f53b8eb98d9c3603d60f61075ee7f7cdafc08baef95f5ae9d58ad8bf4a5f66
+PASS id escaping b04f7965b473527ee5276eb53f96cf432f38018ecc5d984fb207776050d10f46
+PASS id resolver c76f19307e87ab4c7097b1019f27a698223b20be1d6cacd3fb26607d247a411e
+== authoritative URI equality ==
+PASS uri true|filter|escaping|resolver
+== descriptor equality ==
+PASS descriptor true|filter|escaping|resolver
+== cross parse: Go canonicalizes Rust descriptors ==
+PASS go-parse-rust true|filter|escaping|resolver
+== cross parse: Rust canonicalizes Go descriptors ==
+PASS rust-parse-go true|filter|escaping|resolver
+== causal closure equality ==
+PASS causal 58f09b15991e2de83a8f689327a928d31e3df8c80cf44562293377316b6c92ae
+PASS causal canonical bytes
+context cross-language gate: all checks passed
+```
+
+Note the `filter` case ID above (`04f5...`) differs from the committed
+conformance vector `002_root_filter_budget` because the gate case also carries a
+closure and capability hash. Both are correct for their inputs.
+
+### 6.3 Unit and replay tests
+
+```sh
+scripts/docker-court.sh go "cd WeftCodec-Go && go test ./..."
+# Observed: all packages ok, including
+#   ok github.com/infinityabundance/WeftCodec-Go/context
+# The context package has 4 top-level test functions; TestContextVectors runs
+# 16 vector subtests and TestCausalVectors runs 10 vector subtests.
+
+scripts/docker-court.sh go "cd WeftCodec-Go && gofmt -l context cmd/weftcodec limits hash && go vet ./..."
+# Observed: no output (gofmt clean, vet clean).
+```
+
+Existing codec cross-language gate re-run: all modes decode in both directions,
+all deterministic frame bytes identical, ZSTD/DICTIONARY differing bytes allowed
+by §12. No regression.
+
+`bash scripts/check-spec-drift.sh` (run in the rust court):
+`spec drift: OK (24 file comparisons across 3 repos)`.
+
+### 6.4 Deliberate Go-side decisions
+
+These match the Rust implementation; the spec is authoritative.
+
+1. `context uri --descriptor` filters `--descriptor` before stdlib `flag`
+   parsing so it can appear anywhere in the argument list.
+2. `context parse` accepts `--json` before or after the URI (stdlib `flag`
+   stops at the first positional, so this is handled explicitly).
+3. Descriptor parsing sorts/deduplicates `closure`; canonical record decoding
+   remains strict. This mirrors `WEFT-CONTEXT-ROOT.md` §5.4.
+4. `context id` uses pretty JSON with the same field names as Rust; the
+   cross-language gate compares semantic fields and canonical URIs, not raw
+   JSON formatting.
+
+### 6.5 Vector provenance
+
+`conformance/PROVENANCE.md` records the producing Rust commit and the aggregate
+SHA-256 for the new files. The files are append-only; the Go tests only read
+them.
+
+### 6.6 Not implemented (labelled precisely)
+
+- Context resolution, snapshot existence/integrity checks, authorization
+  filtering, budget enforcement, evidence filtering, materialization, FUSE
+  context mounts, and revocation: **specified, not implemented** (F2/F3).
+- `IdentityMode` is represented as text semantics and documented in
+  `spec/WEFT-CAUSAL.md`; the version-record extension is not implemented in
+  either codec (no store writes in this repository).
+- AI codec modes: **specified, not implemented**; no mode values allocated.
+- No cryptographic capability claim. A `CapabilityHash` is an identifier.
+- No performance or model-checking claim for the new identities.

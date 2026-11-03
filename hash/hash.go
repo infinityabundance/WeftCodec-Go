@@ -23,15 +23,18 @@ const HashLen = 32
 
 // Domain strings (WEFTCODEC-FORMAT §1.1).
 const (
-	DomainChunk      = "weft/chunk/v1"
-	DomainManifest   = "weft/manifest/v1"
-	DomainStructured = "weft/structured/v1"
-	DomainSelector   = "weft/selector/v1"
-	DomainSnapshot   = "weft/snapshot/v1"
-	DomainCommit     = "weft/store/commit/v1"
-	DomainRelation   = "weft/relation/v1"
-	DomainVersion    = "weft/version/v1"
-	DomainObject     = "weft/object/v1"
+	DomainChunk       = "weft/chunk/v1"
+	DomainManifest    = "weft/manifest/v1"
+	DomainStructured  = "weft/structured/v1"
+	DomainSelector    = "weft/selector/v1"
+	DomainSnapshot    = "weft/snapshot/v1"
+	DomainCommit      = "weft/store/commit/v1"
+	DomainRelation    = "weft/relation/v1"
+	DomainVersion     = "weft/version/v1"
+	DomainObject      = "weft/object/v1"
+	DomainContextRoot = "weft/context-root/v1"
+	DomainCausal      = "weft/causal/v1"
+	DomainCapability  = "weft/capability/v1"
 )
 
 // Hash32 is a 32-byte Weft digest. It is comparable and ordered

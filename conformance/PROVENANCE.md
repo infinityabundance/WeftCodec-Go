@@ -20,3 +20,25 @@ wrong (or a new schema version must add new files). New vectors may only be
 added alongside a version bump; existing files stay untouched.
 
 The Go tests in `conformance/` replay every vector and do not modify them.
+
+---
+
+## F1 Context Root and causal vectors (append-only addition)
+
+- Source repository: `https://github.com/infinityabundance/WeftCodec`
+- Source commit: `cdd579c85fa76d4bff79ac957b69a0d6b7cd5960` (`staging`)
+- Copy date: 2026-11-03
+- Files copied: `v1/context/` (16 files) and `v1/causal/` (10 files) from the
+  tested Rust implementation; `conformance/README.md` was updated with their
+  layouts in the same change.
+- Aggregate SHA-256 over `sha256sum` lines of the 26 new `*.json` files, sorted
+  with `LC_ALL=C sort`:
+  `f52b42580b4608b813be0bf8847826726c1b214282fb176918692bf85186652e`
+- `conformance/README.md` SHA-256:
+  `25bbed7860003939a5e78052109e8d2d60efb14ce6127b6194f92bdc6386f634`
+
+The 16 context files are 6 canonical records plus 10 rejection vectors; the 10
+causal files are 4 canonical records plus 6 rejection vectors. The Go tests
+replay them without modification. Existing `codec/`, `structured/`, and
+`selectors/` vectors were **not** regenerated or changed; their provenance above
+still applies.
