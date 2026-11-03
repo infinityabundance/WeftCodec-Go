@@ -213,24 +213,49 @@ func encodeAuto(data, base, dict []byte, level, chunkSize int, lim limits.Limits
 	return best.frame, nil
 }
 
+// addLimitFlags registers the decoder resource bounds. Defaults are the
+// normative v1 values; each flag can only lower its bound.
+func addLimitFlags(fs *flag.FlagSet, lim *limits.Limits) {
+	fs.Uint64Var(&lim.MaxFrameBytes, "max-frame-bytes", lim.MaxFrameBytes, "maximum encoded frame bytes")
+	fs.Uint64Var(&lim.MaxDecodedBytes, "max-decoded-bytes", lim.MaxDecodedBytes, "maximum decoded bytes")
+	fs.Uint64Var(&lim.MaxDependencyDepth, "max-dependency-depth", lim.MaxDependencyDepth, "maximum dependency DAG depth")
+	fs.Uint64Var(&lim.MaxDependencyCount, "max-dependency-count", lim.MaxDependencyCount, "maximum dependency table entries")
+	fs.Uint64Var(&lim.MaxTotalFetchedBytes, "max-total-fetched-bytes", lim.MaxTotalFetchedBytes, "maximum fetched dependency frame bytes")
+	fs.Uint64Var(&lim.MaxChunks, "max-chunks", lim.MaxChunks, "maximum chunk table entries")
+	fs.Uint64Var(&lim.MaxDictionaryBytes, "max-dictionary-bytes", lim.MaxDictionaryBytes, "maximum dictionary bytes")
+	fs.Uint64Var(&lim.MaxDeltaOps, "max-delta-ops", lim.MaxDeltaOps, "maximum delta operations")
+	fs.Uint64Var(&lim.MaxStructuredDepth, "max-structured-depth", lim.MaxStructuredDepth, "maximum WCB nesting depth")
+	fs.Uint64Var(&lim.MaxStructuredItems, "max-structured-items", lim.MaxStructuredItems, "maximum WCB item count")
+	fs.Uint64Var(&lim.MaxSelectorBytes, "max-selector-bytes", lim.MaxSelectorBytes, "maximum selector source bytes")
+	fs.Uint64Var(&lim.MaxSelectorDepth, "max-selector-depth", lim.MaxSelectorDepth, "maximum selector AST depth")
+	fs.Uint64Var(&lim.MaxSelectorOperands, "max-selector-operands", lim.MaxSelectorOperands, "maximum selector AST operands")
+	fs.Uint64Var(&lim.MaxArchiveEntries, "max-archive-entries", lim.MaxArchiveEntries, "maximum archive entries")
+}
+
 func runDecode(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("decode", flag.ContinueOnError)
 	input := fs.String("input", "", "frame path or - for stdin")
 	output := fs.String("output", "", "plaintext path or - for stdout")
-	deps := fs.String("deps", "", "directory of dependency files named by lowercase hex digest")
+	deps := fs.String("deps", "", "directory of dependency plaintext files named by lowercase hex digest")
+	frameSource := fs.String("frame-source", "", "directory of dependency frames named by content hash (enables DAG decode)")
+	lim := limits.Default()
+	addLimitFlags(fs, &lim)
 	if err := fs.Parse(args); err != nil {
 		return werrors.NewParse(err.Error())
 	}
 	if *input == "" || *output == "" {
 		return werrors.NewParse("decode requires --input and --output")
 	}
-	lim := limits.Default()
 	frameBytes, err := readLimited(*input, lim.MaxFrameBytes)
 	if err != nil {
 		return err
 	}
-	resolver := resolverFor(*deps)
-	plaintext, err := modes.DecodeBytes(ctx, frameBytes, resolver, lim)
+	var plaintext []byte
+	if *frameSource != "" {
+		plaintext, err = modes.DecodeDAG(ctx, dependency.NewDirectoryFrameSource(*frameSource, lim.MaxFrameBytes), frameBytes, lim)
+	} else {
+		plaintext, err = modes.DecodeBytes(ctx, frameBytes, resolverFor(*deps), lim)
+	}
 	if err != nil {
 		return err
 	}
@@ -385,13 +410,14 @@ func runArchive(ctx context.Context, args []string) error {
 	case "create":
 		fs := flag.NewFlagSet("archive create", flag.ContinueOnError)
 		output := fs.String("output", "", "archive output path")
+		lim := limits.Default()
+		addLimitFlags(fs, &lim)
 		if err := fs.Parse(args[1:]); err != nil {
 			return werrors.NewParse(err.Error())
 		}
 		if *output == "" || fs.NArg() < 1 {
 			return werrors.NewParse("archive create requires --output and at least one frame")
 		}
-		lim := limits.Default()
 		frames := make([][]byte, 0, fs.NArg())
 		for _, path := range fs.Args() {
 			b, err := readLimited(path, lim.MaxFrameBytes)
@@ -409,13 +435,14 @@ func runArchive(ctx context.Context, args []string) error {
 		fs := flag.NewFlagSet("archive decode", flag.ContinueOnError)
 		input := fs.String("input", "", "archive input path")
 		outDir := fs.String("out-dir", "", "directory for decoded plaintext files")
+		lim := limits.Default()
+		addLimitFlags(fs, &lim)
 		if err := fs.Parse(args[1:]); err != nil {
 			return werrors.NewParse(err.Error())
 		}
 		if *input == "" || *outDir == "" {
 			return werrors.NewParse("archive decode requires --input and --out-dir")
 		}
-		lim := limits.Default()
 		b, err := readLimited(*input, lim.MaxTotalFetchedBytes)
 		if err != nil {
 			return err
@@ -449,13 +476,14 @@ func runSelector(args []string) error {
 		fs := flag.NewFlagSet("selector id", flag.ContinueOnError)
 		input := fs.String("input", "", "selector source file")
 		asJSON := fs.Bool("json", false, "emit JSON")
+		lim := limits.Default()
+		addLimitFlags(fs, &lim)
 		if err := fs.Parse(args[1:]); err != nil {
 			return werrors.NewParse(err.Error())
 		}
 		if *input == "" {
 			return werrors.NewParse("selector id requires --input")
 		}
-		lim := limits.Default()
 		b, err := readLimited(*input, lim.MaxSelectorBytes)
 		if err != nil {
 			return err
@@ -492,13 +520,14 @@ func runSelector(args []string) error {
 	case "canonicalize":
 		fs := flag.NewFlagSet("selector canonicalize", flag.ContinueOnError)
 		input := fs.String("input", "", "selector source file")
+		lim := limits.Default()
+		addLimitFlags(fs, &lim)
 		if err := fs.Parse(args[1:]); err != nil {
 			return werrors.NewParse(err.Error())
 		}
 		if *input == "" {
 			return werrors.NewParse("selector canonicalize requires --input")
 		}
-		lim := limits.Default()
 		b, err := readLimited(*input, lim.MaxSelectorBytes)
 		if err != nil {
 			return err

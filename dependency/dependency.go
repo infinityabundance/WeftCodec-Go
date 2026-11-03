@@ -179,6 +179,48 @@ func (m *MapFrameSource) Len() int {
 	return len(m.frames)
 }
 
+// DirectoryFrameSource reads complete frames from files named by lowercase
+// content hash. Files are read lazily so the DAG fetch bound counts only frames
+// actually traversed.
+type DirectoryFrameSource struct {
+	Dir           string
+	MaxFrameBytes uint64
+}
+
+// NewDirectoryFrameSource returns a frame source rooted at dir.
+func NewDirectoryFrameSource(dir string, maxFrameBytes uint64) *DirectoryFrameSource {
+	return &DirectoryFrameSource{Dir: dir, MaxFrameBytes: maxFrameBytes}
+}
+
+// GetFrame implements FrameSource.
+func (d *DirectoryFrameSource) GetFrame(ctx context.Context, contentHash hash.Hash32) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, werrors.NewIo("frame source canceled: " + err.Error())
+	}
+	path := filepath.Join(d.Dir, contentHash.Hex())
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, werrors.NewIo(fmt.Sprintf("cannot stat frame %s: %v", path, err))
+	}
+	if !info.Mode().IsRegular() {
+		return nil, false, nil
+	}
+	if err := limits.CheckLen(uint64(info.Size()), d.MaxFrameBytes, "dependency frame"); err != nil {
+		return nil, false, err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, werrors.NewIo(fmt.Sprintf("cannot read frame %s: %v", path, err))
+	}
+	if err := limits.CheckLen(uint64(len(b)), d.MaxFrameBytes, "dependency frame"); err != nil {
+		return nil, false, err
+	}
+	return b, true, nil
+}
+
 // GetFrame implements FrameSource.
 func (m *MapFrameSource) GetFrame(ctx context.Context, contentHash hash.Hash32) ([]byte, bool, error) {
 	if err := ctx.Err(); err != nil {
