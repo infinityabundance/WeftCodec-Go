@@ -221,6 +221,8 @@ func DecodeBytes(ctx context.Context, frameBytes []byte, resolver dependency.Res
 		plaintext, err = DecodeFloatTensorFrame(f, lim)
 	case frame.ModeTensorSharded:
 		plaintext, err = DecodeShardedPlanes(f, lim)
+	case frame.ModeWeightDelta:
+		plaintext, err = DecodeWeightDeltaFrame(ctx, f, resolver, lim)
 	default:
 		err = werrors.UnsupportedModef("mode %d is not decodable", f.Header.Mode)
 	}

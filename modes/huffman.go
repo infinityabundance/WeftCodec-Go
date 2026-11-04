@@ -234,10 +234,27 @@ func HuffmanEncode(input []byte) []byte {
 }
 
 // HuffmanDecode decodes a huffman-canonical-v1 stream into exactly
-// expectedLen bytes.
+// expectedLen bytes. The whole slice is one stream: any trailing byte after
+// the declared output is Corrupt.
 func HuffmanDecode(encoded []byte, expectedLen int) ([]byte, error) {
+	out, consumed, err := HuffmanDecodePrefix(encoded, expectedLen)
+	if err != nil {
+		return nil, err
+	}
+	if consumed != len(encoded) {
+		return nil, werrors.NewCorrupt(
+			"huffman-canonical-v1 bitstream has trailing bytes after the declared output")
+	}
+	return out, nil
+}
+
+// HuffmanDecodePrefix decodes one huffman-canonical-v1 stream from the start
+// of encoded and returns the decoded bytes plus the number of bytes consumed
+// (the 256-byte table plus its own padded bitstream). Used where several
+// independently coded planes are concatenated (mode 11).
+func HuffmanDecodePrefix(encoded []byte, expectedLen int) ([]byte, int, error) {
 	if len(encoded) < huffmanTableBytes {
-		return nil, werrors.Corruptf(
+		return nil, 0, werrors.Corruptf(
 			"huffman-canonical-v1 stream is %d bytes, shorter than its %d-byte code-length table",
 			len(encoded), huffmanTableBytes)
 	}
@@ -250,7 +267,7 @@ func HuffmanDecode(encoded []byte, expectedLen int) ([]byte, error) {
 	for symbol, lengthByte := range lengths {
 		length := int(lengthByte)
 		if length > huffmanMaxCodeBits {
-			return nil, werrors.NonCanonicalf(
+			return nil, 0, werrors.NonCanonicalf(
 				"huffman-canonical-v1 symbol %d has code length %d > %d",
 				symbol, length, huffmanMaxCodeBits)
 		}
@@ -265,28 +282,20 @@ func HuffmanDecode(encoded []byte, expectedLen int) ([]byte, error) {
 
 	if used == 0 {
 		if expectedLen != 0 {
-			return nil, werrors.NewCorrupt(
+			return nil, 0, werrors.NewCorrupt(
 				"huffman-canonical-v1 table has no symbols but the descriptor declares a non-empty plane")
 		}
-		if len(stream) != 0 {
-			return nil, werrors.NewCorrupt(
-				"huffman-canonical-v1 empty plane has trailing bitstream bytes")
-		}
-		return []byte{}, nil
+		return []byte{}, huffmanTableBytes, nil
 	}
 
 	if used == 1 {
 		if maxLen != 1 {
-			return nil, werrors.NewNonCanonical(
+			return nil, 0, werrors.NewNonCanonical(
 				"huffman-canonical-v1 single-symbol table must use code length 1")
 		}
 		if expectedLen == 0 {
-			return nil, werrors.NewNonCanonical(
+			return nil, 0, werrors.NewNonCanonical(
 				"huffman-canonical-v1 non-empty table for an empty plane")
-		}
-		if len(stream) != 0 {
-			return nil, werrors.NewCorrupt(
-				"huffman-canonical-v1 single-symbol stream must be empty")
 		}
 		symbol := byte(0)
 		for index, length := range lengths {
@@ -299,11 +308,11 @@ func HuffmanDecode(encoded []byte, expectedLen int) ([]byte, error) {
 		for index := range out {
 			out[index] = symbol
 		}
-		return out, nil
+		return out, huffmanTableBytes, nil
 	}
 
 	if expectedLen == 0 {
-		return nil, werrors.NewNonCanonical(
+		return nil, 0, werrors.NewNonCanonical(
 			"huffman-canonical-v1 non-empty table for an empty plane")
 	}
 
@@ -312,12 +321,12 @@ func HuffmanDecode(encoded []byte, expectedLen int) ([]byte, error) {
 	for length := 1; length <= huffmanMaxCodeBits; length++ {
 		usedSpace += uint64(counts[length]) << uint(huffmanMaxCodeBits-length)
 		if usedSpace > space {
-			return nil, werrors.NewNonCanonical(
+			return nil, 0, werrors.NewNonCanonical(
 				"huffman-canonical-v1 code lengths are over-subscribed")
 		}
 	}
 	if usedSpace != space {
-		return nil, werrors.NewNonCanonical(
+		return nil, 0, werrors.NewNonCanonical(
 			"huffman-canonical-v1 code lengths are incomplete")
 	}
 
@@ -377,12 +386,12 @@ func HuffmanDecode(encoded []byte, expectedLen int) ([]byte, error) {
 				}
 			}
 			if currentLen >= maxLen {
-				return nil, werrors.NewCorrupt(
+				return nil, 0, werrors.NewCorrupt(
 					"huffman-canonical-v1 bitstream contains an invalid code")
 			}
 		}
 		if bitPos >= len(stream)*8 {
-			return nil, werrors.Corruptf(
+			return nil, 0, werrors.Corruptf(
 				"huffman-canonical-v1 bitstream ended after %d of %d bytes",
 				len(out), expectedLen)
 		}
@@ -392,17 +401,17 @@ func HuffmanDecode(encoded []byte, expectedLen int) ([]byte, error) {
 		bitPos++
 	}
 
-	remaining := len(stream)*8 - bitPos
-	if remaining >= 8 {
-		return nil, werrors.NewCorrupt(
-			"huffman-canonical-v1 bitstream has trailing bytes after the declared output")
-	}
-	if remaining > 0 {
-		mask := byte(1<<uint(remaining)) - 1
-		if stream[len(stream)-1]&mask != 0 {
-			return nil, werrors.NewCorrupt(
+	// Padding is checked only inside the bytes this stream consumed; any
+	// further bytes belong to the caller (the next plane).
+	consumedStream := (bitPos + 7) / 8
+	usedBitsInLast := bitPos % 8
+	if usedBitsInLast != 0 {
+		last := stream[consumedStream-1]
+		mask := byte(1<<uint(8-usedBitsInLast)) - 1
+		if last&mask != 0 {
+			return nil, 0, werrors.NewCorrupt(
 				"huffman-canonical-v1 padding bits must be zero")
 		}
 	}
-	return out, nil
+	return out, huffmanTableBytes + consumedStream, nil
 }

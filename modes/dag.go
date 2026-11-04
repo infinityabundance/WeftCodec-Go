@@ -96,6 +96,27 @@ func (d *dagResolver) Resolve(ctx context.Context, h hash.Hash32, decodedLen uin
 	return decoded, nil
 }
 
+// ResolveFrame returns the complete frame for contentHash when the source has
+// it. Mode 11 uses this to verify the base frame's own dtype/shape descriptor;
+// plaintext resolution still goes through Resolve, which enforces depth,
+// cycle, and hash checks.
+func (d *dagResolver) ResolveFrame(ctx context.Context, contentHash hash.Hash32) ([]byte, bool, error) {
+	if err := d.ctx.Err(); err != nil {
+		return nil, false, werrors.NewIo("dependency resolution canceled: " + err.Error())
+	}
+	frameBytes, ok, err := d.source.GetFrame(ctx, contentHash)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	if err := limits.CheckLen(uint64(len(frameBytes)), d.limits.MaxFrameBytes, "dependency frame"); err != nil {
+		return nil, false, err
+	}
+	return frameBytes, true, nil
+}
+
 // DecodeDAG recursively decodes a frame DAG.
 //
 // Dependency frames are fetched by content hash through source, decoded

@@ -79,6 +79,7 @@ usage:
   weftcodec encode --mode tensor --input PAYLOAD --dtype D --shape 2,3 | --metadata FILE
   weftcodec encode --mode quantized --input PAYLOAD --dtype i8|u8 --shape 2,3 --scale F [--zero-point N]
   weftcodec encode --mode float-tensor --input PAYLOAD --dtype D --shape 2,3 | --metadata FILE
+  weftcodec encode --mode weight-delta --input TARGET --base BASE_FRAME --dtype bf16|fp16|fp32|q8_0|q4_0 --shape 2,3
   weftcodec encode --mode tensor-sharded --input WORDS --output DIR --dtype q8_0|q4_0 --shape 4,8 --axis A --shards N --block-size B --scales BITS,... --zero-points Z,...
   weftcodec encode --mode tokens --input TOKENS.json
   weftcodec decode --input FILE --output FILE [--deps DIR]
@@ -103,7 +104,7 @@ func runEncode(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("encode", flag.ContinueOnError)
 	input := fs.String("input", "", "input path or - for stdin")
 	output := fs.String("output", "", "output path or - for stdout")
-	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|auto")
+	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|weight-delta|auto")
 	basePath := fs.String("base", "", "base bytes for reference/delta/auto")
 	dictPath := fs.String("dict", "", "raw-content zstd dictionary for dictionary/auto")
 	level := fs.Int("level", 3, "zstd level")
@@ -155,6 +156,8 @@ func runEncode(ctx context.Context, args []string) error {
 			*scale, scaleSet, *zeroPoint, lim)
 	case "float-tensor", "float_tensor":
 		encoded, err = encodeFloatTensor(data, *dtype, *shape, *metadata, lim)
+	case "weight-delta", "weight_delta":
+		encoded, err = encodeWeightDelta(ctx, data, *dtype, *shape, base, lim)
 	case "tensor-sharded", "tensor_sharded":
 		return encodeTensorSharded(data, *dtype, *shape, *metadata, uint32(*axis), uint32(*shards),
 			*blockSize, *scales, *zeroPoints, visited, *output, lim)
@@ -474,6 +477,30 @@ func encodeFloatTensor(
 	return modes.EncodeFloatTensor(payload, parsed, shape, lim)
 }
 
+func encodeWeightDelta(
+	ctx context.Context, target []byte, dtypeText, shapeText string, baseFrame []byte, lim limits.Limits,
+) ([]byte, error) {
+	if baseFrame == nil {
+		return nil, werrors.NewMalformed("WEIGHT_DELTA encoding requires --base FRAME")
+	}
+	if dtypeText == "" {
+		return nil, werrors.NewMalformed(
+			"WEIGHT_DELTA encoding requires --dtype (bf16|fp16|fp32|q8_0|q4_0)")
+	}
+	dtype, err := modes.ParseWeightDtype(dtypeText)
+	if err != nil {
+		return nil, err
+	}
+	if shapeText == "" {
+		return nil, werrors.NewMalformed("WEIGHT_DELTA encoding requires --shape (rank >= 1)")
+	}
+	shape, err := parseShapeText(shapeText, "shape")
+	if err != nil {
+		return nil, err
+	}
+	return modes.EncodeWeightDelta(ctx, target, dtype, shape, baseFrame, lim)
+}
+
 func encodeMode(mode frame.Mode, data, base, dict []byte, level, chunkSize int, lim limits.Limits) ([]byte, error) {
 	switch mode {
 	case frame.ModeRaw:
@@ -590,6 +617,8 @@ func runDecode(ctx context.Context, args []string) error {
 	output := fs.String("output", "", "plaintext path or - for stdout")
 	deps := fs.String("deps", "", "directory of dependency plaintext files named by lowercase hex digest")
 	frameSource := fs.String("frame-source", "", "directory of dependency frames named by content hash (enables DAG decode)")
+	basePath := fs.String("base", "", "base frame for WEIGHT_DELTA")
+	resolve := fs.Bool("resolve", false, "resolve a WEIGHT_DELTA base through --frame-source")
 	lim := limits.Default()
 	addLimitFlags(fs, &lim)
 	if err := fs.Parse(args); err != nil {
@@ -602,7 +631,30 @@ func runDecode(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	root, err := frame.Parse(frameBytes, lim)
+	if err != nil {
+		return err
+	}
 	var plaintext []byte
+	if root.Header.Mode == frame.ModeWeightDelta {
+		if *resolve && *frameSource == "" {
+			return werrors.NewMalformed("WEIGHT_DELTA --resolve requires --frame-source")
+		}
+		if *basePath != "" {
+			baseFrame, err := readLimited(*basePath, lim.MaxFrameBytes)
+			if err != nil {
+				return err
+			}
+			plaintext, err = modes.DecodeWeightDeltaFrameWithBase(
+				ctx, root, baseFrame, resolverFor(*deps), lim)
+			if err != nil {
+				return err
+			}
+			return writeOutput(*output, plaintext)
+		}
+	} else if *resolve {
+		return werrors.NewMalformed("--resolve applies only to WEIGHT_DELTA frames")
+	}
 	if *frameSource != "" {
 		plaintext, err = modes.DecodeDAG(ctx, dependency.NewDirectoryFrameSource(*frameSource, lim.MaxFrameBytes), frameBytes, lim)
 	} else {
@@ -722,6 +774,24 @@ func runInspect(args []string) error {
 		if h.Mode == frame.ModeFloatTensor {
 			output["exponent_coder"] = modes.HuffmanCoderID
 		}
+		if h.Mode == frame.ModeWeightDelta {
+			meta, err := modes.WeightDeltaMetadata(f, lim)
+			if err != nil {
+				return err
+			}
+			output["dtype"] = meta.Dtype.Name
+			output["shape"] = meta.Shape
+			output["element_count"] = meta.ElementCount
+			output["word_bits"] = meta.WordBits
+			output["base"] = meta.Base.Hex()
+			output["base_dtype"] = meta.BaseDtype.Name
+			output["base_shape"] = meta.BaseShape
+			output["op"] = meta.Op
+			output["planes"] = meta.Planes
+			output["plane_codec"] = meta.PlaneCodec
+			output["delta_root"] = meta.DeltaRoot.Hex()
+			output["payload_len"] = meta.PayloadLen
+		}
 		encoded, err := json.MarshalIndent(output, "", "  ")
 		if err != nil {
 			return werrors.NewIo("cannot serialize inspection: " + err.Error())
@@ -738,6 +808,24 @@ func runInspect(args []string) error {
 	fmt.Printf("mode: %s (%d)\n", h.Mode, uint8(h.Mode))
 	if h.Mode == frame.ModeFloatTensor {
 		fmt.Printf("exponent_coder: %s\n", modes.HuffmanCoderID)
+	}
+	if h.Mode == frame.ModeWeightDelta {
+		meta, err := modes.WeightDeltaMetadata(f, lim)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("dtype: %s\n", meta.Dtype.Name)
+		fmt.Printf("shape: %v\n", meta.Shape)
+		fmt.Printf("element_count: %d\n", meta.ElementCount)
+		fmt.Printf("word_bits: %d\n", meta.WordBits)
+		fmt.Printf("base: %s\n", meta.Base)
+		fmt.Printf("base_dtype: %s\n", meta.BaseDtype.Name)
+		fmt.Printf("base_shape: %v\n", meta.BaseShape)
+		fmt.Printf("op: %s\n", meta.Op)
+		fmt.Printf("planes: %d\n", meta.Planes)
+		fmt.Printf("plane_codec: %s\n", meta.PlaneCodec)
+		fmt.Printf("delta_root: %s\n", meta.DeltaRoot)
+		fmt.Printf("payload_len: %d\n", meta.PayloadLen)
 	}
 	fmt.Printf("flags: 0x%04x %v\n", h.Flags, h.FlagNames())
 	fmt.Printf("features: 0x%04x %v\n", h.Features, h.FeatureNames())

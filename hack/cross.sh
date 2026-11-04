@@ -48,6 +48,16 @@ make_src() {
   sharded_words 32 q8 > "$CROSS/src/sharded_q8.bin"
   sharded_words 64 q4 > "$CROSS/src/sharded_q4.bin"
   sharded_words 16 q8 > "$CROSS/src/sharded_q8_single.bin"
+  # WEIGHT_DELTA (mode 11) fixtures: bf16 with one changed word, fp32 with an
+  # identical base (zero delta), and q8_0 with mixed changed bytes.
+  head -c 12 "$CROSS/src/payload.bin" > "$CROSS/src/weight_base_bf16.bin"
+  cp "$CROSS/src/weight_base_bf16.bin" "$CROSS/src/weight_target_bf16.bin"
+  printf '\x7f' | dd of="$CROSS/src/weight_target_bf16.bin" bs=1 seek=2 conv=notrunc status=none
+  head -c 16 "$CROSS/src/payload.bin" > "$CROSS/src/weight_base_fp32.bin"
+  cp "$CROSS/src/weight_base_fp32.bin" "$CROSS/src/weight_target_fp32.bin"
+  head -c 32 "$CROSS/src/payload.bin" > "$CROSS/src/weight_base_q8.bin"
+  cp "$CROSS/src/weight_base_q8.bin" "$CROSS/src/weight_target_q8.bin"
+  printf '\x01\x02\x03' | dd of="$CROSS/src/weight_target_q8.bin" bs=1 seek=5 conv=notrunc status=none
 }
 
 sharded_words() {
@@ -72,7 +82,7 @@ dep_hash() {
 }
 
 frame_modes() {
-  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform
+  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8
 }
 
 original_for() {
@@ -88,6 +98,9 @@ original_for() {
     float_tensor) echo float_tensor.bin ;;
     float_tensor_single) echo float_tensor_single.bin ;;
     float_tensor_uniform) echo float_tensor_uniform.bin ;;
+    weight_delta_bf16) echo weight_target_bf16.bin ;;
+    weight_delta_fp32) echo weight_target_fp32.bin ;;
+    weight_delta_q8) echo weight_target_q8.bin ;;
     tokens) echo tokens_payload.bin ;;
     *) echo "unknown mode $1" >&2; return 1 ;;
   esac
@@ -116,6 +129,12 @@ rust_gen() {
   for set in sharded_q8 sharded_q4 sharded_q8_single; do
     "$RUST" tensor root --shards-dir "$CROSS/rust/$set" --frames > "$CROSS/rust/$set.root"
   done
+  "$RUST" encode --mode tensor --input "$CROSS/src/weight_base_bf16.bin" --output "$CROSS/rust/weight_base_bf16.wft1" --dtype bf16 --shape 2,3
+  "$RUST" encode --mode weight-delta --input "$CROSS/src/weight_target_bf16.bin" --output "$CROSS/rust/weight_delta_bf16.wft1" --base "$CROSS/rust/weight_base_bf16.wft1" --dtype bf16 --shape 2,3
+  "$RUST" encode --mode tensor --input "$CROSS/src/weight_base_fp32.bin" --output "$CROSS/rust/weight_base_fp32.wft1" --dtype f32 --shape 2,2
+  "$RUST" encode --mode weight-delta --input "$CROSS/src/weight_target_fp32.bin" --output "$CROSS/rust/weight_delta_fp32.wft1" --base "$CROSS/rust/weight_base_fp32.wft1" --dtype fp32 --shape 2,2
+  "$RUST" encode --mode tensor --input "$CROSS/src/weight_base_q8.bin" --output "$CROSS/rust/weight_base_q8.wft1" --dtype i8 --shape 4,8
+  "$RUST" encode --mode weight-delta --input "$CROSS/src/weight_target_q8.bin" --output "$CROSS/rust/weight_delta_q8.wft1" --base "$CROSS/rust/weight_base_q8.wft1" --dtype q8_0 --shape 4,8
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/reference.wft1" "$RUST")"
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/delta.wft1" "$RUST")"
   cp "$CROSS/src/dict.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/dictionary.wft1" "$RUST")"
@@ -150,6 +169,12 @@ go_gen() {
   for set in sharded_q8 sharded_q4 sharded_q8_single; do
     "$GO" tensor root --shards-dir "$CROSS/go/$set" --frames > "$CROSS/go/$set.root"
   done
+  "$GO" encode --mode tensor --input "$CROSS/src/weight_base_bf16.bin" --output "$CROSS/go/weight_base_bf16.wft1" --dtype bf16 --shape 2,3
+  "$GO" encode --mode weight-delta --input "$CROSS/src/weight_target_bf16.bin" --output "$CROSS/go/weight_delta_bf16.wft1" --base "$CROSS/go/weight_base_bf16.wft1" --dtype bf16 --shape 2,3
+  "$GO" encode --mode tensor --input "$CROSS/src/weight_base_fp32.bin" --output "$CROSS/go/weight_base_fp32.wft1" --dtype f32 --shape 2,2
+  "$GO" encode --mode weight-delta --input "$CROSS/src/weight_target_fp32.bin" --output "$CROSS/go/weight_delta_fp32.wft1" --base "$CROSS/go/weight_base_fp32.wft1" --dtype fp32 --shape 2,2
+  "$GO" encode --mode tensor --input "$CROSS/src/weight_base_q8.bin" --output "$CROSS/go/weight_base_q8.wft1" --dtype i8 --shape 4,8
+  "$GO" encode --mode weight-delta --input "$CROSS/src/weight_target_q8.bin" --output "$CROSS/go/weight_delta_q8.wft1" --base "$CROSS/go/weight_base_q8.wft1" --dtype q8_0 --shape 4,8
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/reference.wft1" "$GO")"
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/delta.wft1" "$GO")"
   cp "$CROSS/src/dict.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/dictionary.wft1" "$GO")"
@@ -162,6 +187,9 @@ go_decode() {
     args=(decode --input "$CROSS/rust/$mode.wft1" --output "$CROSS/go-decoded/$mode.bin")
     case "$mode" in
       reference|delta|dictionary) args+=(--deps "$CROSS/rust/deps") ;;
+      weight_delta_bf16) args+=(--base "$CROSS/rust/weight_base_bf16.wft1") ;;
+      weight_delta_fp32) args+=(--base "$CROSS/rust/weight_base_fp32.wft1") ;;
+      weight_delta_q8) args+=(--base "$CROSS/rust/weight_base_q8.wft1") ;;
     esac
     "$GO" "${args[@]}"
   done
@@ -181,6 +209,9 @@ rust_decode() {
     args=(decode --input "$CROSS/go/$mode.wft1" --output "$CROSS/rust-decoded/$mode.bin")
     case "$mode" in
       reference|delta|dictionary) args+=(--deps "$CROSS/go/deps") ;;
+      weight_delta_bf16) args+=(--base "$CROSS/go/weight_base_bf16.wft1") ;;
+      weight_delta_fp32) args+=(--base "$CROSS/go/weight_base_fp32.wft1") ;;
+      weight_delta_q8) args+=(--base "$CROSS/go/weight_base_q8.wft1") ;;
     esac
     "$RUST" "${args[@]}"
   done
@@ -212,7 +243,7 @@ compare() {
   done
 
   echo "== deterministic frame bytes (Go == Rust) =="
-  for mode in raw raw_empty raw_chunked reference delta structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform; do
+  for mode in raw raw_empty raw_chunked reference delta structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8; do
     if cmp -s "$CROSS/rust/$mode.wft1" "$CROSS/go/$mode.wft1"; then
       echo "PASS identical $mode"
     else
