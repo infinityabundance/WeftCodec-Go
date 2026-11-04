@@ -82,3 +82,21 @@ byte-identical re-encoding for the five valid AI vectors.
   `"superseded_by": "017_unknown_mode_reserved9"`.
 - The Go suite asserts byte-identical re-encoding for the three valid
   QUANTIZED_TENSOR vectors and replays every reject vector.
+
+## FLOAT_TENSOR mode-9 vectors (append-only addition, 2026-11-04)
+
+- Source repository: `https://github.com/infinityabundance/WeftCodec`
+- Source: Rust conformance generator at the WeftCodec revision recorded by the
+  FLOAT_TENSOR commit.
+- Files added: `108_float_bf16_2x2`, `109_float_fp16_3d`,
+  `110_float_fp32_4d` (valid); `140`–`147` (rejects for unknown dtype,
+  element-count mismatch, rank 0, zero dimension, field-width mismatch,
+  plane-length overflow, non-zstd exponent plane, decoded-length mismatch);
+  `017_unknown_mode_reserved10` (mode 10 remains reserved).
+- `017_unknown_mode_reserved9` keeps its original bytes and adds
+  `"superseded_by": "017_unknown_mode_reserved10"`.
+- The Go suite replays all three valid vectors and all eight rejects. It does
+  **not** assert frame-byte identity for FLOAT_TENSOR: the exponent plane is a
+  zstd frame and libzstd (Rust) and klauspost/compress (Go) emit different
+  valid frames. Decode equivalence in both directions is asserted by
+  `hack/cross.sh`, matching the ZSTD/DICTIONARY rule.

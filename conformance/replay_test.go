@@ -325,7 +325,12 @@ func TestSelectorVectors(t *testing.T) {
 
 // TestMetadataByteEquality proves the Go encoder reproduces the frozen Rust
 // frame bytes for the byte-deterministic modes: RAW (chunked and unchunked),
-// REFERENCE, DELTA, and STRUCTURED.
+// REFERENCE, DELTA, STRUCTURED, TENSOR, TOKENS, and QUANTIZED_TENSOR.
+//
+// FLOAT_TENSOR is deliberately excluded: its exponent plane is a zstd frame,
+// and libzstd (Rust) and klauspost/compress (Go) produce different valid
+// frames. The Go conformance replay and hack/cross.sh assert decode
+// equivalence for it instead.
 func TestMetadataByteEquality(t *testing.T) {
 	lim := limits.Default()
 	cases := []string{

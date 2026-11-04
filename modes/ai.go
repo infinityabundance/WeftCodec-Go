@@ -84,6 +84,22 @@ func buildAIBody(meta wcb.Value, payload []byte, lim limits.Limits) ([]byte, err
 }
 
 func splitAIBody(body []byte, decodedLen uint64) ([]byte, []byte, error) {
+	descriptor, payload, err := splitAIBodyPrefix(body)
+	if err != nil {
+		return nil, nil, err
+	}
+	if uint64(len(payload)) != decodedLen {
+		return nil, nil, werrors.Malformedf(
+			"AI payload length %d differs from decoded_len %d", len(payload), decodedLen)
+	}
+	return descriptor, payload, nil
+}
+
+// splitAIBodyPrefix splits the descriptor prefix from the stored payload
+// without assuming the stored payload length equals decoded_len. FLOAT_TENSOR
+// needs this because its stored planes are smaller than the reconstructed
+// element bytes.
+func splitAIBodyPrefix(body []byte) ([]byte, []byte, error) {
 	if len(body) < 4 {
 		return nil, nil, werrors.NewMalformed(
 			"AI body is shorter than its 4-byte metadata length")
@@ -94,12 +110,7 @@ func splitAIBody(body []byte, decodedLen uint64) ([]byte, []byte, error) {
 		return nil, nil, werrors.NewMalformed(
 			"AI metadata extends past the frame body")
 	}
-	payload := body[metaEnd:]
-	if uint64(len(payload)) != decodedLen {
-		return nil, nil, werrors.Malformedf(
-			"AI payload length %d differs from decoded_len %d", len(payload), decodedLen)
-	}
-	return body[4:metaEnd], payload, nil
+	return body[4:metaEnd], body[metaEnd:], nil
 }
 
 func metaText(m map[string]wcb.Value, key string) (string, error) {
