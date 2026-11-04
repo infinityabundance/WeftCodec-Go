@@ -22,48 +22,52 @@ const MaxCausalEntries = 4096
 const MaxCapabilityEntries = 4096
 
 type ContextRootRecord struct {
-	Namespace string
-	Selector []byte
-	SelectorID [32]byte
-	Snapshot [32]byte
-	Resolver string
-	Causal [][32]byte
-	Ordering string
+	Namespace      string
+	Selector       []byte
+	SelectorID     [32]byte
+	Snapshot       [32]byte
+	Resolver       string
+	Causal         [][32]byte
+	Ordering       string
 	CapabilityHash *[32]byte
-	Budget *BudgetRecord
+	Budget         *BudgetRecord
 }
+
 var ContextRootRecordFields = []string{"namespace", "selector", "selector_id", "snapshot", "resolver", "causal", "ordering", "capability_hash", "budget"}
 
 type CausalClosureRecord struct {
 	Parents [][32]byte
 	Closure [][32]byte
 }
+
 var CausalClosureRecordFields = []string{"parents", "closure"}
 
 type CapabilityScopeRecord struct {
-	Principal string
+	Principal  string
 	Namespaces []string
-	Roots [][32]byte
+	Roots      [][32]byte
 	Predicates []string
-	Budget *BudgetRecord
-	ExpiresAt *int64
+	Budget     *BudgetRecord
+	ExpiresAt  *int64
 }
+
 var CapabilityScopeRecordFields = []string{"principal", "namespaces", "roots", "predicates", "budget", "expires_at"}
 
 type BudgetRecord struct {
 	MaxResults *uint64
-	MaxBytes *uint64
-	MaxDepth *uint64
-	MaxWork *uint64
+	MaxBytes   *uint64
+	MaxDepth   *uint64
+	MaxWork    *uint64
 }
+
 var BudgetRecordFields = []string{"max_results", "max_bytes", "max_depth", "max_work"}
 
 // RecordFields returns a copy of every generated record field list.
 func RecordFields() map[string][]string {
 	return map[string][]string{
 		"context-root": append([]string(nil), ContextRootRecordFields...),
-		"causal": append([]string(nil), CausalClosureRecordFields...),
-		"capability": append([]string(nil), CapabilityScopeRecordFields...),
-		"budget": append([]string(nil), BudgetRecordFields...),
+		"causal":       append([]string(nil), CausalClosureRecordFields...),
+		"capability":   append([]string(nil), CapabilityScopeRecordFields...),
+		"budget":       append([]string(nil), BudgetRecordFields...),
 	}
 }
