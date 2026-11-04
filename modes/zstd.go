@@ -51,6 +51,9 @@ func compressZstd(data []byte, level int) ([]byte, error) {
 	encoder, err := zstd.NewWriter(nil,
 		zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(level)),
 		zstd.WithEncoderConcurrency(1),
+		// Empty input MUST still produce a valid minimal zstd frame; without
+		// this option klauspost returns no bytes at all.
+		zstd.WithZeroFrames(true),
 	)
 	if err != nil {
 		return nil, werrors.Malformedf("zstd compressor init failed: %v", err)
@@ -64,6 +67,9 @@ func compressZstdWithDictionary(data, dict []byte, level int) ([]byte, error) {
 		zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(level)),
 		zstd.WithEncoderConcurrency(1),
 		zstd.WithEncoderDictRaw(0, dict),
+		// Empty input MUST still produce a valid minimal zstd frame; without
+		// this option klauspost returns no bytes at all.
+		zstd.WithZeroFrames(true),
 	)
 	if err != nil {
 		return nil, werrors.Malformedf("zstd dictionary init failed: %v", err)
@@ -72,9 +78,33 @@ func compressZstdWithDictionary(data, dict []byte, level int) ([]byte, error) {
 	return encoder.EncodeAll(data, nil), nil
 }
 
+// checkZstdPreamble validates the zstd frame preamble shared by ZSTD,
+// DICTIONARY, and chunked ZSTD payloads before decompression.
+//
+// An empty payload is structural (Malformed): a zstd frame is never zero
+// bytes, even for empty plaintext. If the frame header declares a content
+// size, it MUST equal the Weft decoded_len (Corrupt on disagreement), so a
+// stream cannot declare a different length than the frame embedding it.
+func checkZstdPreamble(body []byte, declaredLen uint64) error {
+	if len(body) == 0 {
+		return werrors.Malformedf("zstd payload is empty; a zstd frame is never zero bytes")
+	}
+	var header zstd.Header
+	if err := header.Decode(body); err == nil && header.HasFCS &&
+		header.FrameContentSize != declaredLen {
+		return werrors.Corruptf(
+			"zstd frame declares content size %d, Weft header declares %d",
+			header.FrameContentSize, declaredLen)
+	}
+	return nil
+}
+
 // decompressZstd decompresses exactly one zstd frame, capping the output at
 // declaredLen and failing closed on a length mismatch.
 func decompressZstd(body []byte, declaredLen uint64) ([]byte, error) {
+	if err := checkZstdPreamble(body, declaredLen); err != nil {
+		return nil, err
+	}
 	if declaredLen > math.MaxInt64-1 {
 		return nil, werrors.LimitExceededf(
 			"declared zstd output length %d does not fit int64", declaredLen)
@@ -93,6 +123,9 @@ func decompressZstd(body []byte, declaredLen uint64) ([]byte, error) {
 // decompressZstdWithDictionary decompresses a zstd frame using a raw-content
 // dictionary with an exact output bound.
 func decompressZstdWithDictionary(body []byte, declaredLen uint64, dict []byte) ([]byte, error) {
+	if err := checkZstdPreamble(body, declaredLen); err != nil {
+		return nil, err
+	}
 	if declaredLen > math.MaxInt64-1 {
 		return nil, werrors.LimitExceededf(
 			"declared zstd output length %d does not fit int64", declaredLen)
