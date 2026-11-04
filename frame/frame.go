@@ -94,6 +94,9 @@ const (
 	// ModeActivationStream is the activation/gradient stream chunk mode
 	// (WEFT-AI-CODEC §14).
 	ModeActivationStream Mode = 13
+	// ModeSemanticDelta is the semantically matched exact tensor delta mode
+	// (WEFT-AI-CODEC §15).
+	ModeSemanticDelta Mode = 14
 )
 
 // String returns the lowercase mode name.
@@ -127,6 +130,8 @@ func (m Mode) String() string {
 		return "kv_cache"
 	case ModeActivationStream:
 		return "activation_stream"
+	case ModeSemanticDelta:
+		return "semantic_delta"
 	default:
 		return fmt.Sprintf("mode(%d)", uint8(m))
 	}
@@ -135,7 +140,7 @@ func (m Mode) String() string {
 // ModeFromU8 validates a wire mode value.
 func ModeFromU8(v uint8) (Mode, error) {
 	switch {
-	case v <= 13:
+	case v <= 14:
 		return Mode(v), nil
 	case v <= 127:
 		return 0, werrors.UnsupportedModef("reserved mode %d is not defined in v1", v)
@@ -175,6 +180,8 @@ func ModeFromName(name string) (Mode, error) {
 		return ModeKvCache, nil
 	case "activation_stream", "activation-stream", "activation":
 		return ModeActivationStream, nil
+	case "semantic_delta", "semantic-delta", "semanticdelta":
+		return ModeSemanticDelta, nil
 	default:
 		return 0, werrors.UnsupportedModef("unknown mode %q", name)
 	}
@@ -753,32 +760,37 @@ func validateModeRules(h Header, deps []Dependency, lim limits.Limits) error {
 			return werrors.NewMalformed(
 				"AI-mode body is shorter than its 4-byte metadata length")
 		}
-	case ModeWeightDelta:
+	case ModeWeightDelta, ModeSemanticDelta:
+		modeName := "WEIGHT_DELTA"
+		if h.Mode == ModeSemanticDelta {
+			modeName = "SEMANTIC_DELTA"
+		}
 		if h.Domain != DomainPayload {
-			return werrors.NewMalformed(
-				"WEIGHT_DELTA frame must use the payload domain")
+			return werrors.Malformedf(
+				"%s frame must use the payload domain", modeName)
 		}
 		if dictFlag {
 			return werrors.NewMalformed("DICT_RAW is only valid for DICTIONARY")
 		}
 		if h.DepCount != 1 {
-			return werrors.NewMalformed(
-				"WEIGHT_DELTA requires exactly one dependency")
+			return werrors.Malformedf(
+				"%s requires exactly one dependency", modeName)
 		}
 		if h.ChunkCount != 0 {
-			return werrors.NewMalformed("WEIGHT_DELTA must not be chunked")
+			return werrors.Malformedf(
+				"%s must not be chunked", modeName)
 		}
 		if h.BodyLen < 4 {
-			return werrors.NewMalformed(
-				"WEIGHT_DELTA body is shorter than its 4-byte metadata length")
+			return werrors.Malformedf(
+				"%s body is shorter than its 4-byte metadata length", modeName)
 		}
 		if deps[0].DepDomain != DepDomainPayload {
-			return werrors.NewMalformed(
-				"WEIGHT_DELTA dependency must use dep_domain 0 (payload)")
+			return werrors.Malformedf(
+				"%s dependency must use dep_domain 0 (payload)", modeName)
 		}
 		if h.DecodedLen != deps[0].DecodedLen {
-			return werrors.NewMalformed(
-				"WEIGHT_DELTA decoded_len must equal the base decoded_len")
+			return werrors.Malformedf(
+				"%s decoded_len must equal the base decoded_len", modeName)
 		}
 	case ModeDictionary:
 		if h.Domain != DomainPayload {

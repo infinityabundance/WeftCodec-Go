@@ -119,6 +119,7 @@ func runEncode(ctx context.Context, args []string) error {
 	blockSize := fs.Uint64("block-size", 0, "TENSOR_SHARDED block size (16, 32, 64, 128, 256)")
 	scales := fs.String("scales", "", "TENSOR_SHARDED per-block f32 scale bits, comma-separated u32")
 	zeroPoints := fs.String("zero-points", "", "TENSOR_SHARDED per-block zero points, comma-separated i64")
+	semanticPolicy := fs.String("semantic-policy", "", "SEMANTIC_DELTA policy: none|mantissa_truncate:N|block_quantize:B:L")
 	if err := fs.Parse(args); err != nil {
 		return werrors.NewParse(err.Error())
 	}
@@ -158,6 +159,8 @@ func runEncode(ctx context.Context, args []string) error {
 		encoded, err = encodeFloatTensor(data, *dtype, *shape, *metadata, lim)
 	case "weight-delta", "weight_delta":
 		encoded, err = encodeWeightDelta(ctx, data, *dtype, *shape, base, lim)
+	case "semantic-delta", "semantic_delta":
+		encoded, err = encodeSemanticDelta(ctx, data, *dtype, *shape, base, *semanticPolicy, lim)
 	case "kv-cache", "kv_cache":
 		encoded, err = encodeKvCache(data, *metadata, lim)
 	case "activation-stream", "activation_stream":
@@ -580,6 +583,100 @@ func encodeWeightDelta(
 	return modes.EncodeWeightDelta(ctx, target, dtype, shape, baseFrame, lim)
 }
 
+func semanticPolicyJSON(policy modes.SemanticPolicy) map[string]any {
+	out := map[string]any{"scheme": policy.Scheme}
+	switch policy.Scheme {
+	case "mantissa_truncate":
+		out["bits"] = policy.Bits
+	case "block_quantize":
+		out["block_size"] = policy.BlockSize
+		out["levels"] = policy.Levels
+	}
+	return out
+}
+
+func parseSemanticPolicyText(text string) (modes.SemanticPolicy, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return modes.SemanticPolicy{}, werrors.NewMalformed(
+			"SEMANTIC_DELTA encoding requires --semantic-policy (none|mantissa_truncate:N|block_quantize:B:L)")
+	}
+	if text == "none" {
+		return modes.NonePolicy(), nil
+	}
+	if rest, ok := strings.CutPrefix(text, "mantissa_truncate:"); ok {
+		return parseMantissaPolicy(rest)
+	}
+	if rest, ok := strings.CutPrefix(text, "mantissa-truncate:"); ok {
+		return parseMantissaPolicy(rest)
+	}
+	if rest, ok := strings.CutPrefix(text, "block_quantize:"); ok {
+		return parseBlockPolicy(rest)
+	}
+	if rest, ok := strings.CutPrefix(text, "block-quantize:"); ok {
+		return parseBlockPolicy(rest)
+	}
+	return modes.SemanticPolicy{}, werrors.Malformedf(
+		"unknown --semantic-policy %q (none|mantissa_truncate:N|block_quantize:B:L)", text)
+}
+
+func parseMantissaPolicy(rest string) (modes.SemanticPolicy, error) {
+	bits, err := strconv.ParseUint(rest, 10, 32)
+	if err != nil {
+		return modes.SemanticPolicy{}, werrors.Malformedf(
+			"bad --semantic-policy bits %q: %v", rest, err)
+	}
+	return modes.MantissaTruncatePolicy(uint32(bits)), nil
+}
+
+func parseBlockPolicy(rest string) (modes.SemanticPolicy, error) {
+	parts := strings.Split(rest, ":")
+	if len(parts) != 2 {
+		return modes.SemanticPolicy{}, werrors.NewMalformed(
+			"block_quantize policy requires block_size and levels")
+	}
+	blockSize, err := strconv.ParseUint(parts[0], 10, 64)
+	if err != nil {
+		return modes.SemanticPolicy{}, werrors.Malformedf(
+			"bad block_quantize block_size %q: %v", parts[0], err)
+	}
+	levels, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil {
+		return modes.SemanticPolicy{}, werrors.Malformedf(
+			"bad block_quantize levels %q: %v", parts[1], err)
+	}
+	return modes.BlockQuantizePolicy(blockSize, levels), nil
+}
+
+func encodeSemanticDelta(
+	ctx context.Context, target []byte, dtypeText, shapeText string, baseFrame []byte,
+	policyText string, lim limits.Limits,
+) ([]byte, error) {
+	if baseFrame == nil {
+		return nil, werrors.NewMalformed("SEMANTIC_DELTA encoding requires --base FRAME")
+	}
+	if dtypeText == "" {
+		return nil, werrors.NewMalformed(
+			"SEMANTIC_DELTA encoding requires --dtype (bf16|fp16|fp32|q8_0|q4_0)")
+	}
+	dtype, err := modes.ParseWeightDtype(dtypeText)
+	if err != nil {
+		return nil, err
+	}
+	if shapeText == "" {
+		return nil, werrors.NewMalformed("SEMANTIC_DELTA encoding requires --shape (rank >= 1)")
+	}
+	shape, err := parseShapeText(shapeText, "shape")
+	if err != nil {
+		return nil, err
+	}
+	policy, err := parseSemanticPolicyText(policyText)
+	if err != nil {
+		return nil, err
+	}
+	return modes.EncodeSemanticDelta(ctx, target, dtype, shape, baseFrame, policy, lim)
+}
+
 func encodeMode(mode frame.Mode, data, base, dict []byte, level, chunkSize int, lim limits.Limits) ([]byte, error) {
 	switch mode {
 	case frame.ModeRaw:
@@ -715,24 +812,29 @@ func runDecode(ctx context.Context, args []string) error {
 		return err
 	}
 	var plaintext []byte
-	if root.Header.Mode == frame.ModeWeightDelta {
+	if root.Header.Mode == frame.ModeWeightDelta || root.Header.Mode == frame.ModeSemanticDelta {
 		if *resolve && *frameSource == "" {
-			return werrors.NewMalformed("WEIGHT_DELTA --resolve requires --frame-source")
+			return werrors.NewMalformed("delta modes require --frame-source with --resolve")
 		}
 		if *basePath != "" {
 			baseFrame, err := readLimited(*basePath, lim.MaxFrameBytes)
 			if err != nil {
 				return err
 			}
-			plaintext, err = modes.DecodeWeightDeltaFrameWithBase(
-				ctx, root, baseFrame, resolverFor(*deps), lim)
+			if root.Header.Mode == frame.ModeSemanticDelta {
+				plaintext, err = modes.DecodeSemanticDeltaFrameWithBase(
+					ctx, root, baseFrame, resolverFor(*deps), lim)
+			} else {
+				plaintext, err = modes.DecodeWeightDeltaFrameWithBase(
+					ctx, root, baseFrame, resolverFor(*deps), lim)
+			}
 			if err != nil {
 				return err
 			}
 			return writeOutput(*output, plaintext)
 		}
 	} else if *resolve {
-		return werrors.NewMalformed("--resolve applies only to WEIGHT_DELTA frames")
+		return werrors.NewMalformed("--resolve applies only to WEIGHT_DELTA and SEMANTIC_DELTA frames")
 	}
 	if *frameSource != "" {
 		plaintext, err = modes.DecodeDAG(ctx, dependency.NewDirectoryFrameSource(*frameSource, lim.MaxFrameBytes), frameBytes, lim)
@@ -871,6 +973,25 @@ func runInspect(args []string) error {
 			output["delta_root"] = meta.DeltaRoot.Hex()
 			output["payload_len"] = meta.PayloadLen
 		}
+		if h.Mode == frame.ModeSemanticDelta {
+			meta, err := modes.SemanticDeltaMetadata(f, lim)
+			if err != nil {
+				return err
+			}
+			output["dtype"] = meta.Dtype.Name
+			output["shape"] = meta.Shape
+			output["element_count"] = meta.ElementCount
+			output["word_bits"] = meta.WordBits
+			output["base"] = meta.Base.Hex()
+			output["base_dtype"] = meta.BaseDtype.Name
+			output["base_shape"] = meta.BaseShape
+			output["base_semantic_root"] = meta.BaseSemanticRoot.Hex()
+			output["policy"] = semanticPolicyJSON(meta.Policy)
+			output["planes"] = meta.Dtype.Planes
+			output["plane_codec"] = meta.PlaneCodec
+			output["delta_root"] = meta.DeltaRoot.Hex()
+			output["payload_len"] = meta.PayloadLen
+		}
 		if h.Mode == frame.ModeKvCache {
 			meta, err := modes.KvCacheMetadata(f, lim)
 			if err != nil {
@@ -940,6 +1061,25 @@ func runInspect(args []string) error {
 		fmt.Printf("base_shape: %v\n", meta.BaseShape)
 		fmt.Printf("op: %s\n", meta.Op)
 		fmt.Printf("planes: %d\n", meta.Planes)
+		fmt.Printf("plane_codec: %s\n", meta.PlaneCodec)
+		fmt.Printf("delta_root: %s\n", meta.DeltaRoot)
+		fmt.Printf("payload_len: %d\n", meta.PayloadLen)
+	}
+	if h.Mode == frame.ModeSemanticDelta {
+		meta, err := modes.SemanticDeltaMetadata(f, lim)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("dtype: %s\n", meta.Dtype.Name)
+		fmt.Printf("shape: %v\n", meta.Shape)
+		fmt.Printf("element_count: %d\n", meta.ElementCount)
+		fmt.Printf("word_bits: %d\n", meta.WordBits)
+		fmt.Printf("base: %s\n", meta.Base)
+		fmt.Printf("base_dtype: %s\n", meta.BaseDtype.Name)
+		fmt.Printf("base_shape: %v\n", meta.BaseShape)
+		fmt.Printf("base_semantic_root: %s\n", meta.BaseSemanticRoot)
+		fmt.Printf("policy: %s\n", meta.Policy.String())
+		fmt.Printf("planes: %d\n", meta.Dtype.Planes)
 		fmt.Printf("plane_codec: %s\n", meta.PlaneCodec)
 		fmt.Printf("delta_root: %s\n", meta.DeltaRoot)
 		fmt.Printf("payload_len: %d\n", meta.PayloadLen)

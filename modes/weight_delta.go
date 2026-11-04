@@ -494,6 +494,12 @@ func BaseFrameDescriptor(f *frame.Frame, lim limits.Limits) (WeightDtype, []uint
 			return WeightDtype{}, nil, err
 		}
 		return meta.Dtype, meta.Shape, nil
+	case frame.ModeSemanticDelta:
+		meta, err := SemanticDeltaMetadata(f, lim)
+		if err != nil {
+			return WeightDtype{}, nil, err
+		}
+		return meta.Dtype, meta.Shape, nil
 	default:
 		return WeightDtype{}, nil, werrors.Malformedf(
 			"base frame mode %s does not carry tensor dtype/shape metadata", f.Header.Mode)

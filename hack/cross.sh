@@ -69,6 +69,19 @@ make_src() {
   head -c 32 "$CROSS/src/payload.bin" > "$CROSS/src/weight_base_q8.bin"
   cp "$CROSS/src/weight_base_q8.bin" "$CROSS/src/weight_target_q8.bin"
   printf '\x01\x02\x03' | dd of="$CROSS/src/weight_target_q8.bin" bs=1 seek=5 conv=notrunc status=none
+  # SEMANTIC_DELTA (mode 14) fixtures: low-bit-only changes that keep the
+  # mantissa_truncate/base semantic root, plus a q8_0 exact pair.
+  head -c 12 "$CROSS/src/payload.bin" > "$CROSS/src/semantic_base_bf16.bin"
+  printf '\x05' | dd of="$CROSS/src/semantic_base_bf16.bin" bs=1 seek=2 conv=notrunc status=none
+  cp "$CROSS/src/semantic_base_bf16.bin" "$CROSS/src/semantic_target_bf16.bin"
+  printf '\x07' | dd of="$CROSS/src/semantic_target_bf16.bin" bs=1 seek=2 conv=notrunc status=none
+  head -c 16 "$CROSS/src/payload.bin" > "$CROSS/src/semantic_base_fp32.bin"
+  printf '\x10' | dd of="$CROSS/src/semantic_base_fp32.bin" bs=1 seek=8 conv=notrunc status=none
+  cp "$CROSS/src/semantic_base_fp32.bin" "$CROSS/src/semantic_target_fp32.bin"
+  printf '\x1f' | dd of="$CROSS/src/semantic_target_fp32.bin" bs=1 seek=8 conv=notrunc status=none
+  head -c 32 "$CROSS/src/payload.bin" > "$CROSS/src/semantic_base_q8.bin"
+  cp "$CROSS/src/semantic_base_q8.bin" "$CROSS/src/semantic_target_q8.bin"
+  printf '\x05\x06\x07' | dd of="$CROSS/src/semantic_target_q8.bin" bs=1 seek=5 conv=notrunc status=none
 }
 
 sharded_words() {
@@ -93,7 +106,7 @@ dep_hash() {
 }
 
 frame_modes() {
-  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8 kv_cache_p0 kv_cache_p1 activation_c0 activation_c1
+  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8 semantic_delta_bf16 semantic_delta_fp32 semantic_delta_q8 kv_cache_p0 kv_cache_p1 activation_c0 activation_c1
 }
 
 original_for() {
@@ -112,6 +125,9 @@ original_for() {
     weight_delta_bf16) echo weight_target_bf16.bin ;;
     weight_delta_fp32) echo weight_target_fp32.bin ;;
     weight_delta_q8) echo weight_target_q8.bin ;;
+    semantic_delta_bf16) echo semantic_target_bf16.bin ;;
+    semantic_delta_fp32) echo semantic_target_fp32.bin ;;
+    semantic_delta_q8) echo semantic_target_q8.bin ;;
     kv_cache_p0) echo kv_page0.bin ;;
     kv_cache_p1) echo kv_page1.bin ;;
     activation_c0) echo activation_chunk0.bin ;;
@@ -150,6 +166,12 @@ rust_gen() {
   "$RUST" encode --mode weight-delta --input "$CROSS/src/weight_target_fp32.bin" --output "$CROSS/rust/weight_delta_fp32.wft1" --base "$CROSS/rust/weight_base_fp32.wft1" --dtype fp32 --shape 2,2
   "$RUST" encode --mode tensor --input "$CROSS/src/weight_base_q8.bin" --output "$CROSS/rust/weight_base_q8.wft1" --dtype i8 --shape 4,8
   "$RUST" encode --mode weight-delta --input "$CROSS/src/weight_target_q8.bin" --output "$CROSS/rust/weight_delta_q8.wft1" --base "$CROSS/rust/weight_base_q8.wft1" --dtype q8_0 --shape 4,8
+  "$RUST" encode --mode tensor --input "$CROSS/src/semantic_base_bf16.bin" --output "$CROSS/rust/semantic_base_bf16.wft1" --dtype bf16 --shape 2,3
+  "$RUST" encode --mode semantic-delta --input "$CROSS/src/semantic_target_bf16.bin" --output "$CROSS/rust/semantic_delta_bf16.wft1" --base "$CROSS/rust/semantic_base_bf16.wft1" --dtype bf16 --shape 2,3 --semantic-policy mantissa_truncate:3
+  "$RUST" encode --mode tensor --input "$CROSS/src/semantic_base_fp32.bin" --output "$CROSS/rust/semantic_base_fp32.wft1" --dtype f32 --shape 2,2
+  "$RUST" encode --mode semantic-delta --input "$CROSS/src/semantic_target_fp32.bin" --output "$CROSS/rust/semantic_delta_fp32.wft1" --base "$CROSS/rust/semantic_base_fp32.wft1" --dtype fp32 --shape 2,2 --semantic-policy mantissa_truncate:8
+  "$RUST" encode --mode tensor --input "$CROSS/src/semantic_base_q8.bin" --output "$CROSS/rust/semantic_base_q8.wft1" --dtype i8 --shape 4,8
+  "$RUST" encode --mode semantic-delta --input "$CROSS/src/semantic_target_q8.bin" --output "$CROSS/rust/semantic_delta_q8.wft1" --base "$CROSS/rust/semantic_base_q8.wft1" --dtype q8_0 --shape 4,8 --semantic-policy none
   "$RUST" encode --mode kv-cache --input "$CROSS/src/kv_page0.bin" --output "$CROSS/rust/kv_cache_p0.wft1" --metadata "$CROSS/src/kv_page0.json"
   "$RUST" encode --mode kv-cache --input "$CROSS/src/kv_page1.bin" --output "$CROSS/rust/kv_cache_p1.wft1" --metadata "$CROSS/src/kv_page1.json"
   "$RUST" encode --mode activation-stream --input "$CROSS/src/activation_chunk0.bin" --output "$CROSS/rust/activation_c0.wft1" --metadata "$CROSS/src/activation_chunk0.json"
@@ -194,6 +216,12 @@ go_gen() {
   "$GO" encode --mode weight-delta --input "$CROSS/src/weight_target_fp32.bin" --output "$CROSS/go/weight_delta_fp32.wft1" --base "$CROSS/go/weight_base_fp32.wft1" --dtype fp32 --shape 2,2
   "$GO" encode --mode tensor --input "$CROSS/src/weight_base_q8.bin" --output "$CROSS/go/weight_base_q8.wft1" --dtype i8 --shape 4,8
   "$GO" encode --mode weight-delta --input "$CROSS/src/weight_target_q8.bin" --output "$CROSS/go/weight_delta_q8.wft1" --base "$CROSS/go/weight_base_q8.wft1" --dtype q8_0 --shape 4,8
+  "$GO" encode --mode tensor --input "$CROSS/src/semantic_base_bf16.bin" --output "$CROSS/go/semantic_base_bf16.wft1" --dtype bf16 --shape 2,3
+  "$GO" encode --mode semantic-delta --input "$CROSS/src/semantic_target_bf16.bin" --output "$CROSS/go/semantic_delta_bf16.wft1" --base "$CROSS/go/semantic_base_bf16.wft1" --dtype bf16 --shape 2,3 --semantic-policy mantissa_truncate:3
+  "$GO" encode --mode tensor --input "$CROSS/src/semantic_base_fp32.bin" --output "$CROSS/go/semantic_base_fp32.wft1" --dtype f32 --shape 2,2
+  "$GO" encode --mode semantic-delta --input "$CROSS/src/semantic_target_fp32.bin" --output "$CROSS/go/semantic_delta_fp32.wft1" --base "$CROSS/go/semantic_base_fp32.wft1" --dtype fp32 --shape 2,2 --semantic-policy mantissa_truncate:8
+  "$GO" encode --mode tensor --input "$CROSS/src/semantic_base_q8.bin" --output "$CROSS/go/semantic_base_q8.wft1" --dtype i8 --shape 4,8
+  "$GO" encode --mode semantic-delta --input "$CROSS/src/semantic_target_q8.bin" --output "$CROSS/go/semantic_delta_q8.wft1" --base "$CROSS/go/semantic_base_q8.wft1" --dtype q8_0 --shape 4,8 --semantic-policy none
   "$GO" encode --mode kv-cache --input "$CROSS/src/kv_page0.bin" --output "$CROSS/go/kv_cache_p0.wft1" --metadata "$CROSS/src/kv_page0.json"
   "$GO" encode --mode kv-cache --input "$CROSS/src/kv_page1.bin" --output "$CROSS/go/kv_cache_p1.wft1" --metadata "$CROSS/src/kv_page1.json"
   "$GO" encode --mode activation-stream --input "$CROSS/src/activation_chunk0.bin" --output "$CROSS/go/activation_c0.wft1" --metadata "$CROSS/src/activation_chunk0.json"
@@ -213,6 +241,9 @@ go_decode() {
       weight_delta_bf16) args+=(--base "$CROSS/rust/weight_base_bf16.wft1") ;;
       weight_delta_fp32) args+=(--base "$CROSS/rust/weight_base_fp32.wft1") ;;
       weight_delta_q8) args+=(--base "$CROSS/rust/weight_base_q8.wft1") ;;
+      semantic_delta_bf16) args+=(--base "$CROSS/rust/semantic_base_bf16.wft1") ;;
+      semantic_delta_fp32) args+=(--base "$CROSS/rust/semantic_base_fp32.wft1") ;;
+      semantic_delta_q8) args+=(--base "$CROSS/rust/semantic_base_q8.wft1") ;;
     esac
     "$GO" "${args[@]}"
   done
@@ -235,6 +266,9 @@ rust_decode() {
       weight_delta_bf16) args+=(--base "$CROSS/go/weight_base_bf16.wft1") ;;
       weight_delta_fp32) args+=(--base "$CROSS/go/weight_base_fp32.wft1") ;;
       weight_delta_q8) args+=(--base "$CROSS/go/weight_base_q8.wft1") ;;
+      semantic_delta_bf16) args+=(--base "$CROSS/go/semantic_base_bf16.wft1") ;;
+      semantic_delta_fp32) args+=(--base "$CROSS/go/semantic_base_fp32.wft1") ;;
+      semantic_delta_q8) args+=(--base "$CROSS/go/semantic_base_q8.wft1") ;;
     esac
     "$RUST" "${args[@]}"
   done
@@ -299,6 +333,15 @@ compare() {
 
   echo "== KV_CACHE (mode 12) / ACTIVATION_STREAM (mode 13) byte identity =="
   for mode in kv_cache_p0 kv_cache_p1 activation_c0 activation_c1; do
+    if cmp -s "$CROSS/rust/$mode.wft1" "$CROSS/go/$mode.wft1"; then
+      echo "YES byte-identical $mode"
+    else
+      echo "NO  byte-identical $mode"; failures=$((failures + 1))
+    fi
+  done
+
+  echo "== SEMANTIC_DELTA (mode 14) byte identity =="
+  for mode in semantic_delta_bf16 semantic_delta_fp32 semantic_delta_q8; do
     if cmp -s "$CROSS/rust/$mode.wft1" "$CROSS/go/$mode.wft1"; then
       echo "YES byte-identical $mode"
     else
