@@ -26,7 +26,8 @@ Honest status as of 2026-11-03 on branch `staging`:
   equivalence. Go uses `github.com/klauspost/compress/zstd`; its ZSTD and
   DICTIONARY frame bytes differ from Rust's as permitted by spec §12, but both
   directions decode exactly. TENSOR and TOKENS frames are byte-identical.
-- **57 top-level tests pass**, including the 20 new AI-mode vectors.
+- All Go unit/vector suites pass, including the 28 AI-mode vectors (TENSOR,
+  TOKENS, QUANTIZED_TENSOR).
 - Not run: fuzzing campaigns, benchmarks, or crash-injection courts. No
   performance claims are made.
 
