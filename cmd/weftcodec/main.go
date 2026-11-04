@@ -25,6 +25,7 @@ import (
 	"github.com/infinityabundance/WeftCodec-Go/limits"
 	"github.com/infinityabundance/WeftCodec-Go/modes"
 	"github.com/infinityabundance/WeftCodec-Go/selector"
+	wefttensor "github.com/infinityabundance/WeftCodec-Go/tensor"
 	"github.com/infinityabundance/WeftCodec-Go/wcb"
 	"github.com/infinityabundance/WeftCodec-Go/werrors"
 )
@@ -53,6 +54,8 @@ func main() {
 		err = runContext(os.Args[2:])
 	case "causal":
 		err = runCausal(os.Args[2:])
+	case "tensor":
+		err = runTensor(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -86,7 +89,11 @@ usage:
   weftcodec context id --selector FILE|- --namespace N --snapshot HEX [--causal HEX,...] [--resolver R] [--capability-hash HEX] [--budget K=V,...] [--json]
   weftcodec context uri --selector FILE|- --namespace N --snapshot HEX [--descriptor] [--json]
   weftcodec context parse weft://... [--json]
-  weftcodec causal id --parents HEX,... [--json]`)
+  weftcodec causal id --parents HEX,... [--json]
+  weftcodec tensor root --input FILE --dtype D --shape 4,3,2 [--layout row-major|column-major|blocked] [--block-shape 2,2,2] [--json]
+  weftcodec tensor root --shards-dir DIR --dtype D --shape 4,3,2 --axis A --shards N [--json]
+  weftcodec tensor split --input FILE --dtype D --shape 4,3,2 --axis A --shards N --out-dir DIR [--json]
+  weftcodec tensor reassemble --shards-dir DIR --dtype D --shape 4,3,2 --axis A --shards N [--output FILE] [--expect-root HEX] [--json]`)
 }
 
 func runEncode(ctx context.Context, args []string) error {
@@ -1115,6 +1122,362 @@ func runCausal(args []string) error {
 		})
 	}
 	fmt.Println(id.Hex())
+	return nil
+}
+
+func runTensor(args []string) error {
+	if len(args) < 1 {
+		return werrors.NewParse("tensor requires root, split, or reassemble")
+	}
+	switch args[0] {
+	case "root":
+		return runTensorRoot(args[1:])
+	case "split":
+		return runTensorSplit(args[1:])
+	case "reassemble":
+		return runTensorReassemble(args[1:])
+	default:
+		return werrors.Newf(werrors.Parse, "unknown tensor verb %q", args[0])
+	}
+}
+
+func parseShapeText(text, what string) ([]uint64, error) {
+	if text == "" {
+		return nil, werrors.NewParse(what + " must not be empty")
+	}
+	parts := strings.Split(text, ",")
+	out := make([]uint64, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, werrors.Newf(werrors.Parse, "%s contains an empty extent", what)
+		}
+		value, err := strconv.ParseUint(part, 10, 64)
+		if err != nil {
+			return nil, werrors.Newf(werrors.Parse, "bad %s extent %q: %v", what, part, err)
+		}
+		out = append(out, value)
+	}
+	return out, nil
+}
+
+func readShardSet(dir, dtype string, shape []uint64, axis, shards uint32, lim limits.Limits) ([]wefttensor.DecodedShard, error) {
+	decoded := make([]wefttensor.DecodedShard, 0, shards)
+	for index := uint32(0); index < shards; index++ {
+		path := filepath.Join(dir, fmt.Sprintf("shard-%d.bin", index))
+		container, err := readLimited(path, lim.MaxDecodedBytes)
+		if err != nil {
+			return nil, err
+		}
+		shard, err := wefttensor.DecodeShard(container, lim)
+		if err != nil {
+			return nil, err
+		}
+		expected := wefttensor.ShardedDescriptor(dtype, shape, axis, shards, index)
+		if !shard.Descriptor.Equal(expected) {
+			return nil, werrors.Malformedf(
+				"shard %d descriptor does not match --dtype/--shape/--axis/--shards", index)
+		}
+		decoded = append(decoded, shard)
+	}
+	return decoded, nil
+}
+
+func tensorSummary(dtype string, shape []uint64, rowMajor []byte, lim limits.Limits) (wefttensor.LogicalRecord, error) {
+	record, err := wefttensor.NewLogicalRecord(dtype, shape, rowMajor, lim)
+	if err != nil {
+		return wefttensor.LogicalRecord{}, err
+	}
+	return record, nil
+}
+
+func runTensorRoot(args []string) error {
+	fs := flag.NewFlagSet("tensor root", flag.ContinueOnError)
+	input := fs.String("input", "", "physical tensor file")
+	shardsDir := fs.String("shards-dir", "", "directory of shard containers")
+	dtype := fs.String("dtype", "", "tensor dtype")
+	shapeText := fs.String("shape", "", "comma-separated u64 extents")
+	layout := fs.String("layout", "row-major", "row-major|column-major|blocked")
+	blockShapeText := fs.String("block-shape", "", "comma-separated block extents")
+	axis := fs.Uint("axis", 0, "shard axis")
+	shards := fs.Uint("shards", 0, "shard count")
+	asJSON := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return werrors.NewParse(err.Error())
+	}
+	axisSet, shardsSet := false, false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "axis":
+			axisSet = true
+		case "shards":
+			shardsSet = true
+		}
+	})
+	if *dtype == "" || *shapeText == "" {
+		return werrors.NewParse("tensor root requires --dtype and --shape")
+	}
+	shape, err := parseShapeText(*shapeText, "shape")
+	if err != nil {
+		return err
+	}
+	lim := limits.Default()
+
+	var rowMajor []byte
+	layoutName := *layout
+	if *shardsDir != "" {
+		if !axisSet || !shardsSet {
+			return werrors.NewParse("--shards-dir requires --axis and --shards")
+		}
+		decoded, err := readShardSet(*shardsDir, *dtype, shape, uint32(*axis), uint32(*shards), lim)
+		if err != nil {
+			return err
+		}
+		rowMajor, err = wefttensor.AssembleShards(decoded, lim)
+		if err != nil {
+			return err
+		}
+		layoutName = "sharded"
+	} else {
+		if *input == "" {
+			return werrors.NewParse("tensor root requires --input or --shards-dir")
+		}
+		data, err := readLimited(*input, lim.MaxDecodedBytes)
+		if err != nil {
+			return err
+		}
+		switch layoutName {
+		case "row-major":
+			rowMajor = data
+		case "column-major":
+			physical, err := wefttensor.NewColumnMajor(*dtype, shape, data, lim)
+			if err != nil {
+				return err
+			}
+			rowMajor, err = physical.AssembleWithLimits(lim)
+			if err != nil {
+				return err
+			}
+		case "blocked":
+			if *blockShapeText == "" {
+				return werrors.NewParse("blocked layout requires --block-shape")
+			}
+			blockShape, err := parseShapeText(*blockShapeText, "block shape")
+			if err != nil {
+				return err
+			}
+			blocks, err := wefttensor.SplitBlockedPayload(*dtype, shape, blockShape, data, lim)
+			if err != nil {
+				return err
+			}
+			physical, err := wefttensor.NewBlocked(*dtype, shape, blockShape, blocks, lim)
+			if err != nil {
+				return err
+			}
+			rowMajor, err = physical.AssembleWithLimits(lim)
+			if err != nil {
+				return err
+			}
+		case "sharded":
+			return werrors.NewParse("sharded layouts must be read with --shards-dir")
+		default:
+			return werrors.UnsupportedFeaturef("unknown tensor layout %q", layoutName)
+		}
+	}
+
+	record, err := tensorSummary(*dtype, shape, rowMajor, lim)
+	if err != nil {
+		return err
+	}
+	root, err := record.Root(lim)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		canonical, err := record.CanonicalBytes(lim)
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{
+			"schema":        wefttensor.LogicalSchema,
+			"dtype":         *dtype,
+			"shape":         shape,
+			"layout":        layoutName,
+			"element_count": record.ElementCount,
+			"values_hash":   record.ValuesHash.Hex(),
+			"logical_root":  root.Hex(),
+			"canonical_hex": hex.EncodeToString(canonical),
+		})
+	}
+	fmt.Println(root.Hex())
+	return nil
+}
+
+func runTensorSplit(args []string) error {
+	fs := flag.NewFlagSet("tensor split", flag.ContinueOnError)
+	input := fs.String("input", "", "canonical row-major tensor file")
+	dtype := fs.String("dtype", "", "tensor dtype")
+	shapeText := fs.String("shape", "", "comma-separated u64 extents")
+	axis := fs.Uint("axis", 0, "shard axis")
+	shards := fs.Uint("shards", 0, "shard count")
+	outDir := fs.String("out-dir", "", "output directory")
+	asJSON := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return werrors.NewParse(err.Error())
+	}
+	if *input == "" || *dtype == "" || *shapeText == "" || *outDir == "" {
+		return werrors.NewParse("tensor split requires --input, --dtype, --shape, and --out-dir")
+	}
+	if *shards == 0 {
+		return werrors.NewParse("tensor split requires --shards >= 1")
+	}
+	shape, err := parseShapeText(*shapeText, "shape")
+	if err != nil {
+		return err
+	}
+	lim := limits.Default()
+	data, err := readLimited(*input, lim.MaxDecodedBytes)
+	if err != nil {
+		return err
+	}
+	split, err := wefttensor.SplitShards(*dtype, shape, uint32(*axis), uint32(*shards), data, lim)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+		return werrors.NewIo(fmt.Sprintf("cannot create %s: %v", *outDir, err))
+	}
+	entries := make([]map[string]any, 0, len(split))
+	for index, payload := range split {
+		descriptor := wefttensor.ShardedDescriptor(*dtype, shape, uint32(*axis), uint32(*shards), uint32(index))
+		container, err := wefttensor.EncodeShard(descriptor, payload, lim)
+		if err != nil {
+			return err
+		}
+		path := filepath.Join(*outDir, fmt.Sprintf("shard-%d.bin", index))
+		if err := writeOutput(path, container); err != nil {
+			return err
+		}
+		descriptorBytes, err := descriptor.CanonicalBytes(lim)
+		if err != nil {
+			return err
+		}
+		entries = append(entries, map[string]any{
+			"index":           index,
+			"payload_bytes":   len(payload),
+			"payload_hash":    wefttensor.ShardPayloadHash(payload).Hex(),
+			"container_bytes": len(container),
+			"descriptor_hex":  hex.EncodeToString(descriptorBytes),
+		})
+	}
+	record, err := tensorSummary(*dtype, shape, data, lim)
+	if err != nil {
+		return err
+	}
+	root, err := record.Root(lim)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		canonical, err := record.CanonicalBytes(lim)
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{
+			"schema":        wefttensor.LogicalSchema,
+			"dtype":         *dtype,
+			"shape":         shape,
+			"axis":          *axis,
+			"shards":        *shards,
+			"element_count": record.ElementCount,
+			"values_hash":   record.ValuesHash.Hex(),
+			"logical_root":  root.Hex(),
+			"canonical_hex": hex.EncodeToString(canonical),
+			"out_dir":       *outDir,
+			"shard_files":   entries,
+		})
+	}
+	fmt.Println(root.Hex())
+	return nil
+}
+
+func runTensorReassemble(args []string) error {
+	fs := flag.NewFlagSet("tensor reassemble", flag.ContinueOnError)
+	shardsDir := fs.String("shards-dir", "", "directory of shard containers")
+	dtype := fs.String("dtype", "", "tensor dtype")
+	shapeText := fs.String("shape", "", "comma-separated u64 extents")
+	axis := fs.Uint("axis", 0, "shard axis")
+	shards := fs.Uint("shards", 0, "shard count")
+	output := fs.String("output", "", "write reassembled bytes here")
+	expectRoot := fs.String("expect-root", "", "expected logical root hex")
+	asJSON := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return werrors.NewParse(err.Error())
+	}
+	if *shardsDir == "" || *dtype == "" || *shapeText == "" || *shards == 0 {
+		return werrors.NewParse("tensor reassemble requires --shards-dir, --dtype, --shape, and --shards")
+	}
+	shape, err := parseShapeText(*shapeText, "shape")
+	if err != nil {
+		return err
+	}
+	lim := limits.Default()
+	decoded, err := readShardSet(*shardsDir, *dtype, shape, uint32(*axis), uint32(*shards), lim)
+	if err != nil {
+		return err
+	}
+	root, err := wefttensor.ShardRoot(decoded, lim)
+	if err != nil {
+		return err
+	}
+	rowMajor, err := wefttensor.AssembleShards(decoded, lim)
+	if err != nil {
+		return err
+	}
+	record, err := tensorSummary(*dtype, shape, rowMajor, lim)
+	if err != nil {
+		return err
+	}
+	recomputed, err := record.Root(lim)
+	if err != nil {
+		return err
+	}
+	if recomputed != root {
+		return werrors.NewCorrupt("reassembled bytes do not reproduce the shard logical root")
+	}
+	if *expectRoot != "" {
+		expected, err := hash.FromHex(*expectRoot)
+		if err != nil {
+			return werrors.NewParse("--expect-root: " + err.Error())
+		}
+		if expected != root {
+			return werrors.Corruptf("logical root %s does not equal expected %s", root, expected)
+		}
+	}
+	if *output != "" {
+		if err := writeOutput(*output, rowMajor); err != nil {
+			return err
+		}
+	}
+	if *asJSON {
+		canonical, err := record.CanonicalBytes(lim)
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{
+			"schema":        wefttensor.LogicalSchema,
+			"dtype":         *dtype,
+			"shape":         shape,
+			"axis":          *axis,
+			"shards":        *shards,
+			"element_count": record.ElementCount,
+			"values_hash":   record.ValuesHash.Hex(),
+			"logical_root":  root.Hex(),
+			"canonical_hex": hex.EncodeToString(canonical),
+			"written":       *output,
+		})
+	}
+	fmt.Println(root.Hex())
 	return nil
 }
 

@@ -47,6 +47,11 @@ func tensorElementSize(dtype string) (uint64, error) {
 	}
 }
 
+// TensorElementSize reports the fixed element size for a tensor dtype name.
+// It is exported for the logical-tensor layer (package tensor), which shares the
+// same dtype table as mode 6 TENSOR frames.
+func TensorElementSize(dtype string) (uint64, error) { return tensorElementSize(dtype) }
+
 func tensorProduct(shape []uint64, lim limits.Limits) (uint64, error) {
 	if uint64(len(shape)) > lim.MaxTensorRank {
 		return 0, werrors.LimitExceededf(
