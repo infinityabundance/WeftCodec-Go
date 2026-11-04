@@ -108,6 +108,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -678,6 +679,12 @@ func classify(
 }
 
 func main() {
+	// The differential court guards peak RSS at 256 MiB. Go's GC is lazy by
+	// default and can hold well above the live heap; pin a soft limit so the
+	// driver actually honours the bound instead of relying on GC timing. This
+	// is a harness policy, not a codec claim: the codec itself bounds every
+	// allocation it makes.
+	debug.SetMemoryLimit(192 << 20)
 	var seedsPath string
 	n := uint64(1_000_000)
 	var dumpIndex uint64
