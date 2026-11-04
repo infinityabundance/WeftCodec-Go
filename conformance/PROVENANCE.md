@@ -100,3 +100,22 @@ byte-identical re-encoding for the five valid AI vectors.
   zstd frame and libzstd (Rust) and klauspost/compress (Go) emit different
   valid frames. Decode equivalence in both directions is asserted by
   `hack/cross.sh`, matching the ZSTD/DICTIONARY rule.
+
+## TENSOR_SHARDED mode-10 vectors (append-only addition, 2026-11-04)
+
+- Source repository: `https://github.com/infinityabundance/WeftCodec`
+- Source: Rust conformance generator at the TENSOR_SHARDED commit, run with
+  `cargo run -- conformance --dir conformance/v1 --sharded-only`.
+- Files added: `v1/sharded/001_q8_0_rank2_2shards`,
+  `002_q4_0_rank3_4shards`, `003_q8_0_rank1_1shard` (valid sets, frames
+  deliberately shuffled); `101_unknown_dtype`, `102_quant_scale_mismatch`,
+  `103_element_count_mismatch`, `104_block_size_invalid`,
+  `105_shape_not_divisible`, `106_index_out_of_range`,
+  `107_duplicate_shard`, `108_malformed_huffman` (rejects).
+- `v1/codec/017_unknown_mode_reserved11` added; `017_unknown_mode_reserved10`
+  keeps its original bytes and adds
+  `"superseded_by": "017_unknown_mode_reserved11"`.
+- The Go suite replays every valid set (decoding each frame, re-encoding it
+  byte-for-byte, reassembling the words, and checking the logical root) and
+  every reject. `hack/cross.sh compare` additionally asserts byte-identical
+  mode-10 frames and identical roots from both CLIs.

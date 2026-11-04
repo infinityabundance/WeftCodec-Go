@@ -55,7 +55,7 @@ func TestStructuralHeaderErrors(t *testing.T) {
 		{"truncated", func() []byte { b := append([]byte(nil), good...); return b[:len(b)-1] }(), werrors.Malformed},
 		{"major", mutate(func(b []byte) { b[4] = 2 }), werrors.UnsupportedVersion},
 		{"minor", mutate(func(b []byte) { b[5] = 1 }), werrors.UnsupportedVersion},
-		{"mode", mutate(func(b []byte) { b[7] = 10 }), werrors.UnsupportedMode},
+		{"mode", mutate(func(b []byte) { b[7] = 11 }), werrors.UnsupportedMode},
 		{"feature", mutate(func(b []byte) {
 			f := binary.LittleEndian.Uint16(b[36:38]) | 0x0004
 			binary.LittleEndian.PutUint16(b[36:38], f)

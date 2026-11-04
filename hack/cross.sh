@@ -44,6 +44,26 @@ make_src() {
   head -c 24576 "$CROSS/src/payload.bin" > "$CROSS/src/float_tensor_uniform.bin"
   printf '{"vocab_schema":"weft.test.vocab.v1","token_ids":[1,2,3]}' > "$CROSS/src/tokens.json"
   printf '\x01\x02\x02' > "$CROSS/src/tokens_payload.bin"
+  # TENSOR_SHARDED (mode 10) word inputs: one byte per quantized value.
+  sharded_words 32 q8 > "$CROSS/src/sharded_q8.bin"
+  sharded_words 64 q4 > "$CROSS/src/sharded_q4.bin"
+  sharded_words 16 q8 > "$CROSS/src/sharded_q8_single.bin"
+}
+
+sharded_words() {
+  local count="$1"
+  local kind="$2"
+  local i=0
+  while [[ "$i" -lt "$count" ]]; do
+    local value
+    if [[ "$kind" == "q4" ]]; then
+      value=$(( i % 16 - 8 ))
+    else
+      value=$(( (i * 7 + 3) % 251 - 125 ))
+    fi
+    printf "\\$(printf '%03o' $(( value & 255 )))"
+    i=$((i + 1))
+  done
 }
 
 dep_hash() {
@@ -90,6 +110,12 @@ rust_gen() {
   "$RUST" encode --input "$CROSS/src/float_tensor_single.bin" --output "$CROSS/rust/float_tensor_single.wft1" --mode float-tensor --dtype fp32 --shape 1024
   "$RUST" encode --input "$CROSS/src/float_tensor_uniform.bin" --output "$CROSS/rust/float_tensor_uniform.wft1" --mode float-tensor --dtype fp32 --shape 2,1024
   "$RUST" encode --input "$CROSS/src/tokens.json" --output "$CROSS/rust/tokens.wft1" --mode tokens
+  "$RUST" encode --mode tensor-sharded --input "$CROSS/src/sharded_q8.bin" --output "$CROSS/rust/sharded_q8" --dtype q8_0 --shape 4,8 --axis 0 --shards 2 --block-size 16 --scales 1056964608,1048576000 --zero-points 0,3
+  "$RUST" encode --mode tensor-sharded --input "$CROSS/src/sharded_q4.bin" --output "$CROSS/rust/sharded_q4" --dtype q4_0 --shape 2,4,8 --axis 1 --shards 4 --block-size 16 --scales 1056964608,1048576000,1040187392,1031798784 --zero-points 0,1,-1,2
+  "$RUST" encode --mode tensor-sharded --input "$CROSS/src/sharded_q8_single.bin" --output "$CROSS/rust/sharded_q8_single" --dtype q8_0 --shape 16 --axis 0 --shards 1 --block-size 16 --scales 1065353216 --zero-points 0
+  for set in sharded_q8 sharded_q4 sharded_q8_single; do
+    "$RUST" tensor root --shards-dir "$CROSS/rust/$set" --frames > "$CROSS/rust/$set.root"
+  done
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/reference.wft1" "$RUST")"
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/delta.wft1" "$RUST")"
   cp "$CROSS/src/dict.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/dictionary.wft1" "$RUST")"
@@ -118,6 +144,12 @@ go_gen() {
   "$GO" encode --input "$CROSS/src/float_tensor_single.bin" --output "$CROSS/go/float_tensor_single.wft1" --mode float-tensor --dtype fp32 --shape 1024
   "$GO" encode --input "$CROSS/src/float_tensor_uniform.bin" --output "$CROSS/go/float_tensor_uniform.wft1" --mode float-tensor --dtype fp32 --shape 2,1024
   "$GO" encode --input "$CROSS/src/tokens.json" --output "$CROSS/go/tokens.wft1" --mode tokens
+  "$GO" encode --mode tensor-sharded --input "$CROSS/src/sharded_q8.bin" --output "$CROSS/go/sharded_q8" --dtype q8_0 --shape 4,8 --axis 0 --shards 2 --block-size 16 --scales 1056964608,1048576000 --zero-points 0,3
+  "$GO" encode --mode tensor-sharded --input "$CROSS/src/sharded_q4.bin" --output "$CROSS/go/sharded_q4" --dtype q4_0 --shape 2,4,8 --axis 1 --shards 4 --block-size 16 --scales 1056964608,1048576000,1040187392,1031798784 --zero-points 0,1,-1,2
+  "$GO" encode --mode tensor-sharded --input "$CROSS/src/sharded_q8_single.bin" --output "$CROSS/go/sharded_q8_single" --dtype q8_0 --shape 16 --axis 0 --shards 1 --block-size 16 --scales 1065353216 --zero-points 0
+  for set in sharded_q8 sharded_q4 sharded_q8_single; do
+    "$GO" tensor root --shards-dir "$CROSS/go/$set" --frames > "$CROSS/go/$set.root"
+  done
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/reference.wft1" "$GO")"
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/delta.wft1" "$GO")"
   cp "$CROSS/src/dict.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/dictionary.wft1" "$GO")"
@@ -133,7 +165,14 @@ go_decode() {
     esac
     "$GO" "${args[@]}"
   done
-  echo "go-decode: decoded $(find "$CROSS/go-decoded" -name '*.bin' | wc -l) Rust frames"
+  for set in sharded_q8 sharded_q4 sharded_q8_single; do
+    mkdir -p "$CROSS/go-decoded/$set"
+    for frame in "$CROSS/rust/$set"/*.wft1; do
+      name=$(basename "$frame" .wft1)
+      "$GO" decode --input "$frame" --output "$CROSS/go-decoded/$set/$name.bin"
+    done
+  done
+  echo "go-decode: decoded $(find "$CROSS/go-decoded" -name '*.bin' | wc -l) Rust frames (including sharded)"
 }
 
 rust_decode() {
@@ -145,7 +184,14 @@ rust_decode() {
     esac
     "$RUST" "${args[@]}"
   done
-  echo "rust-decode: decoded $(find "$CROSS/rust-decoded" -name '*.bin' | wc -l) Go frames"
+  for set in sharded_q8 sharded_q4 sharded_q8_single; do
+    mkdir -p "$CROSS/rust-decoded/$set"
+    for frame in "$CROSS/go/$set"/*.wft1; do
+      name=$(basename "$frame" .wft1)
+      "$RUST" decode --input "$frame" --output "$CROSS/rust-decoded/$set/$name.bin"
+    done
+  done
+  echo "rust-decode: decoded $(find "$CROSS/rust-decoded" -name '*.bin' | wc -l) Go frames (including sharded)"
 }
 
 compare() {
@@ -171,6 +217,29 @@ compare() {
       echo "PASS identical $mode"
     else
       echo "FAIL identical $mode"; failures=$((failures + 1))
+    fi
+  done
+
+  echo "== TENSOR_SHARDED (mode 10) shard sets =="
+  for set in sharded_q8 sharded_q4 sharded_q8_single; do
+    for frame in "$CROSS/rust/$set"/*.wft1; do
+      name=$(basename "$frame")
+      base=${name%.wft1}
+      if cmp -s "$CROSS/rust/$set/$name" "$CROSS/go/$set/$name"; then
+        echo "PASS identical tensor_sharded $set/$name"
+      else
+        echo "FAIL identical tensor_sharded $set/$name"; failures=$((failures + 1))
+      fi
+      if cmp -s "$CROSS/go-decoded/$set/$base.bin" "$CROSS/rust-decoded/$set/$base.bin"; then
+        echo "PASS decode-equivalent tensor_sharded $set/$base"
+      else
+        echo "FAIL decode-equivalent tensor_sharded $set/$base"; failures=$((failures + 1))
+      fi
+    done
+    if cmp -s "$CROSS/rust/$set.root" "$CROSS/go/$set.root"; then
+      echo "PASS identical logical root tensor_sharded $set"
+    else
+      echo "FAIL identical logical root tensor_sharded $set"; failures=$((failures + 1))
     fi
   done
 

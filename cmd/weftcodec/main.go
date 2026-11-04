@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -78,6 +79,7 @@ usage:
   weftcodec encode --mode tensor --input PAYLOAD --dtype D --shape 2,3 | --metadata FILE
   weftcodec encode --mode quantized --input PAYLOAD --dtype i8|u8 --shape 2,3 --scale F [--zero-point N]
   weftcodec encode --mode float-tensor --input PAYLOAD --dtype D --shape 2,3 | --metadata FILE
+  weftcodec encode --mode tensor-sharded --input WORDS --output DIR --dtype q8_0|q4_0 --shape 4,8 --axis A --shards N --block-size B --scales BITS,... --zero-points Z,...
   weftcodec encode --mode tokens --input TOKENS.json
   weftcodec decode --input FILE --output FILE [--deps DIR]
   weftcodec inspect FILE [--json]
@@ -92,6 +94,7 @@ usage:
   weftcodec causal id --parents HEX,... [--json]
   weftcodec tensor root --input FILE --dtype D --shape 4,3,2 [--layout row-major|column-major|blocked] [--block-shape 2,2,2] [--json]
   weftcodec tensor root --shards-dir DIR --dtype D --shape 4,3,2 --axis A --shards N [--json]
+  weftcodec tensor root --shards-dir DIR --frames [--json]
   weftcodec tensor split --input FILE --dtype D --shape 4,3,2 --axis A --shards N --out-dir DIR [--json]
   weftcodec tensor reassemble --shards-dir DIR --dtype D --shape 4,3,2 --axis A --shards N [--output FILE] [--expect-root HEX] [--json]`)
 }
@@ -100,7 +103,7 @@ func runEncode(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("encode", flag.ContinueOnError)
 	input := fs.String("input", "", "input path or - for stdin")
 	output := fs.String("output", "", "output path or - for stdout")
-	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|auto")
+	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|auto")
 	basePath := fs.String("base", "", "base bytes for reference/delta/auto")
 	dictPath := fs.String("dict", "", "raw-content zstd dictionary for dictionary/auto")
 	level := fs.Int("level", 3, "zstd level")
@@ -110,15 +113,17 @@ func runEncode(ctx context.Context, args []string) error {
 	metadata := fs.String("metadata", "", "TENSOR metadata JSON file")
 	scale := fs.Float64("scale", 0, "QUANTIZED_TENSOR affine scale (finite, > 0)")
 	zeroPoint := fs.Int64("zero-point", 0, "QUANTIZED_TENSOR zero point")
+	axis := fs.Uint("axis", 0, "TENSOR_SHARDED shard axis")
+	shards := fs.Uint("shards", 0, "TENSOR_SHARDED shard count")
+	blockSize := fs.Uint64("block-size", 0, "TENSOR_SHARDED block size (16, 32, 64, 128, 256)")
+	scales := fs.String("scales", "", "TENSOR_SHARDED per-block f32 scale bits, comma-separated u32")
+	zeroPoints := fs.String("zero-points", "", "TENSOR_SHARDED per-block zero points, comma-separated i64")
 	if err := fs.Parse(args); err != nil {
 		return werrors.NewParse(err.Error())
 	}
-	scaleSet := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "scale" {
-			scaleSet = true
-		}
-	})
+	visited := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { visited[f.Name] = true })
+	scaleSet := visited["scale"]
 	if *input == "" || *output == "" {
 		return werrors.NewParse("encode requires --input and --output")
 	}
@@ -150,6 +155,9 @@ func runEncode(ctx context.Context, args []string) error {
 			*scale, scaleSet, *zeroPoint, lim)
 	case "float-tensor", "float_tensor":
 		encoded, err = encodeFloatTensor(data, *dtype, *shape, *metadata, lim)
+	case "tensor-sharded", "tensor_sharded":
+		return encodeTensorSharded(data, *dtype, *shape, *metadata, uint32(*axis), uint32(*shards),
+			*blockSize, *scales, *zeroPoints, visited, *output, lim)
 	case "tokens":
 		encoded, err = encodeTokens(data, lim)
 	case "auto":
@@ -174,6 +182,139 @@ type tensorMetaInput struct {
 	Endianness string   `json:"endianness"`
 	Scale      *float64 `json:"scale"`
 	ZeroPoint  *int64   `json:"zero_point"`
+}
+
+type shardedMetaInput struct {
+	Dtype      string   `json:"dtype"`
+	Shape      []uint64 `json:"shape"`
+	Axis       uint32   `json:"axis"`
+	Shards     uint32   `json:"shards"`
+	BlockSize  uint64   `json:"block_size"`
+	Scales     []uint64 `json:"scales"`
+	ZeroPoints []int64  `json:"zero_points"`
+}
+
+func encodeTensorSharded(
+	data []byte, dtypeText, shapeText, metadataPath string,
+	axis uint32, shards uint32, blockSize uint64, scalesText, zeroPointsText string,
+	visited map[string]bool, outputDir string, lim limits.Limits,
+) error {
+	var input modes.ShardedTensorInput
+	if metadataPath != "" {
+		for _, name := range []string{"dtype", "shape", "axis", "shards", "block-size", "scales", "zero-points"} {
+			if visited[name] {
+				return werrors.NewMalformed(
+					"--metadata cannot be combined with TENSOR_SHARDED flags")
+			}
+		}
+		raw, err := readLimited(metadataPath, lim.MaxStringBytes)
+		if err != nil {
+			return err
+		}
+		var meta shardedMetaInput
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			return werrors.Malformedf(
+				"TENSOR_SHARDED metadata must be JSON {\"dtype\":string,\"shape\":[u64,...],\"axis\":u32,\"shards\":u32,\"block_size\":u64,\"scales\":[u32,...],\"zero_points\":[i64,...]}: %v",
+				err)
+		}
+		dtype, err := modes.ParseShardedDtype(meta.Dtype)
+		if err != nil {
+			return err
+		}
+		scales := make([]uint32, 0, len(meta.Scales))
+		for _, bits := range meta.Scales {
+			if bits > uint64(^uint32(0)) {
+				return werrors.NewMalformed("TENSOR_SHARDED scale bits exceed u32")
+			}
+			scales = append(scales, uint32(bits))
+		}
+		input = modes.ShardedTensorInput{
+			Dtype:      dtype,
+			Shape:      meta.Shape,
+			ShardAxis:  meta.Axis,
+			ShardCount: meta.Shards,
+			BlockSize:  meta.BlockSize,
+			Scales:     scales,
+			ZeroPoints: meta.ZeroPoints,
+		}
+	} else {
+		if dtypeText == "" || shapeText == "" || !visited["axis"] || !visited["shards"] ||
+			!visited["block-size"] || !visited["scales"] || !visited["zero-points"] {
+			return werrors.NewParse(
+				"TENSOR_SHARDED encoding requires --dtype/--shape/--axis/--shards/--block-size/--scales/--zero-points or --metadata")
+		}
+		dtype, err := modes.ParseShardedDtype(dtypeText)
+		if err != nil {
+			return err
+		}
+		shape, err := parseShapeText(shapeText, "shape")
+		if err != nil {
+			return err
+		}
+		scales, err := parseU32List(scalesText, "--scales")
+		if err != nil {
+			return err
+		}
+		zeroPoints, err := parseI64List(zeroPointsText, "--zero-points")
+		if err != nil {
+			return err
+		}
+		input = modes.ShardedTensorInput{
+			Dtype:      dtype,
+			Shape:      shape,
+			ShardAxis:  axis,
+			ShardCount: shards,
+			BlockSize:  blockSize,
+			Scales:     scales,
+			ZeroPoints: zeroPoints,
+		}
+	}
+	input.Words = make([]int8, len(data))
+	for index, value := range data {
+		input.Words[index] = int8(value)
+	}
+	frames, err := modes.EncodeShardedTensor(input, lim)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return werrors.NewIo(fmt.Sprintf("cannot create %s: %v", outputDir, err))
+	}
+	for index, encoded := range frames {
+		path := filepath.Join(outputDir, fmt.Sprintf("shard-%d.wft1", index))
+		if err := os.WriteFile(path, encoded, 0o644); err != nil {
+			return werrors.NewIo(fmt.Sprintf("cannot write %s: %v", path, err))
+		}
+	}
+	return nil
+}
+
+func parseU32List(text, what string) ([]uint32, error) {
+	parts := strings.Split(text, ",")
+	out := make([]uint32, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		value, err := strconv.ParseUint(part, 0, 32)
+		if err != nil {
+			return nil, werrors.Malformedf("bad %s value %q: %v", what, part, err)
+		}
+		out = append(out, uint32(value))
+	}
+	return out, nil
+}
+
+func parseI64List(text, what string) ([]int64, error) {
+	parts := strings.Split(text, ",")
+	out := make([]int64, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		value, err := strconv.ParseInt(part, 10, 64)
+		if err != nil {
+			return nil, werrors.Malformedf("bad %s value %q: %v", what, part, err)
+		}
+		out = append(out, value)
+	}
+	return out, nil
 }
 
 type tokensInput struct {
@@ -1191,6 +1332,65 @@ func tensorSummary(dtype string, shape []uint64, rowMajor []byte, lim limits.Lim
 	return record, nil
 }
 
+func tensorShardedRoot(dir, input, dtype, shapeText string, asJSON bool, lim limits.Limits) error {
+	if dir == "" {
+		return werrors.NewParse("--frames requires --shards-dir")
+	}
+	if input != "" || dtype != "" || shapeText != "" {
+		return werrors.NewParse("--frames cannot be combined with --dtype, --shape, or --input")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return werrors.NewIo(fmt.Sprintf("cannot read %s: %v", dir, err))
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.Type().IsRegular() && strings.HasPrefix(name, "shard-") && strings.HasSuffix(name, ".wft1") {
+			paths = append(paths, filepath.Join(dir, name))
+		}
+	}
+	sort.Strings(paths)
+	if len(paths) == 0 {
+		return werrors.Malformedf("%s contains no shard-<index>.wft1 frames", dir)
+	}
+	shards := make([]modes.DecodedTensorShard, 0, len(paths))
+	for _, path := range paths {
+		raw, err := readLimited(path, lim.MaxDecodedBytes)
+		if err != nil {
+			return err
+		}
+		parsed, err := frame.Parse(raw, lim)
+		if err != nil {
+			return err
+		}
+		shard, err := modes.DecodeShardFrame(parsed, lim)
+		if err != nil {
+			return err
+		}
+		shards = append(shards, shard)
+	}
+	root, err := modes.ShardedSetRoot(shards, lim)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		meta := shards[0].Meta
+		return printJSON(map[string]any{
+			"schema":        modes.TensorShardedSchema,
+			"dtype":         meta.Dtype.Name(),
+			"shape":         meta.Shape,
+			"element_count": meta.ElementCount,
+			"shard_axis":    meta.ShardAxis,
+			"shard_count":   meta.ShardCount,
+			"block_size":    meta.BlockSize,
+			"layout_root":   root.Hex(),
+		})
+	}
+	fmt.Println(root.Hex())
+	return nil
+}
+
 func runTensorRoot(args []string) error {
 	fs := flag.NewFlagSet("tensor root", flag.ContinueOnError)
 	input := fs.String("input", "", "physical tensor file")
@@ -1201,9 +1401,14 @@ func runTensorRoot(args []string) error {
 	blockShapeText := fs.String("block-shape", "", "comma-separated block extents")
 	axis := fs.Uint("axis", 0, "shard axis")
 	shards := fs.Uint("shards", 0, "shard count")
+	frames := fs.Bool("frames", false, "read TENSOR_SHARDED mode-10 frames from --shards-dir")
 	asJSON := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
 		return werrors.NewParse(err.Error())
+	}
+	lim := limits.Default()
+	if *frames {
+		return tensorShardedRoot(*shardsDir, *input, *dtype, *shapeText, *asJSON, lim)
 	}
 	axisSet, shardsSet := false, false
 	fs.Visit(func(f *flag.Flag) {
@@ -1221,7 +1426,6 @@ func runTensorRoot(args []string) error {
 	if err != nil {
 		return err
 	}
-	lim := limits.Default()
 
 	var rowMajor []byte
 	layoutName := *layout

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"math"
 
+	"github.com/infinityabundance/WeftCodec-Go/dtype"
 	"github.com/infinityabundance/WeftCodec-Go/frame"
 	"github.com/infinityabundance/WeftCodec-Go/hash"
 	"github.com/infinityabundance/WeftCodec-Go/limits"
@@ -30,21 +31,13 @@ type TokenMeta struct {
 	PayloadBytes uint64
 }
 
-func tensorElementSize(dtype string) (uint64, error) {
-	switch dtype {
-	case "f16", "bf16", "i16":
-		return 2, nil
-	case "f32", "i32":
-		return 4, nil
-	case "f64", "i64":
-		return 8, nil
-	case "i8", "u8":
-		return 1, nil
-	default:
-		return 0, werrors.Malformedf(
-			"unknown tensor dtype %q (v1 allows f16, bf16, f32, f64, i8, u8, i16, i32, i64)",
-			dtype)
+func tensorElementSize(name string) (uint64, error) {
+	if size, ok := dtype.ElementSize(name); ok {
+		return size, nil
 	}
+	return 0, werrors.Malformedf(
+		"unknown tensor dtype %q (v1 allows f16, bf16, f32, f64, i8, u8, i16, i32, i64)",
+		name)
 }
 
 // TensorElementSize reports the fixed element size for a tensor dtype name.

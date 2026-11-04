@@ -42,6 +42,8 @@ const (
 	DomainQuantizedTensorPayload = "weft/quantized-tensor/payload/v1"
 	// Float-tensor stored-payload binding (WEFT-AI-CODEC §5).
 	DomainFloatTensorPayload = "weft/float-tensor/payload/v1"
+	// Sharded quantized tensor stored-payload binding (WEFT-AI-CODEC §11).
+	DomainTensorShardedPayload = "weft/tensor-sharded/payload/v1"
 )
 
 // Hash32 is a 32-byte Weft digest. It is comparable and ordered

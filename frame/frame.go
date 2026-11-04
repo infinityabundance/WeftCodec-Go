@@ -85,6 +85,8 @@ const (
 	ModeQuantizedTensor Mode = 8
 	// ModeFloatTensor is the split float tensor mode (WEFT-AI-CODEC §5).
 	ModeFloatTensor Mode = 9
+	// ModeTensorSharded is the sharded quantized tensor mode (WEFT-AI-CODEC §11).
+	ModeTensorSharded Mode = 10
 )
 
 // String returns the lowercase mode name.
@@ -110,6 +112,8 @@ func (m Mode) String() string {
 		return "quantized_tensor"
 	case ModeFloatTensor:
 		return "float_tensor"
+	case ModeTensorSharded:
+		return "tensor_sharded"
 	default:
 		return fmt.Sprintf("mode(%d)", uint8(m))
 	}
@@ -118,7 +122,7 @@ func (m Mode) String() string {
 // ModeFromU8 validates a wire mode value.
 func ModeFromU8(v uint8) (Mode, error) {
 	switch {
-	case v <= 9:
+	case v <= 10:
 		return Mode(v), nil
 	case v <= 127:
 		return 0, werrors.UnsupportedModef("reserved mode %d is not defined in v1", v)
@@ -150,6 +154,8 @@ func ModeFromName(name string) (Mode, error) {
 		return ModeQuantizedTensor, nil
 	case "float_tensor", "float-tensor":
 		return ModeFloatTensor, nil
+	case "tensor_sharded", "tensor-sharded", "sharded":
+		return ModeTensorSharded, nil
 	default:
 		return 0, werrors.UnsupportedModef("unknown mode %q", name)
 	}
@@ -708,7 +714,7 @@ func validateModeRules(h Header, deps []Dependency, lim limits.Limits) error {
 		if h.ChunkCount != 0 {
 			return werrors.NewMalformed("DELTA must not be chunked")
 		}
-	case ModeTensor, ModeTokenSequence, ModeQuantizedTensor, ModeFloatTensor:
+	case ModeTensor, ModeTokenSequence, ModeQuantizedTensor, ModeFloatTensor, ModeTensorSharded:
 		if h.Domain != DomainPayload {
 			return werrors.NewMalformed(
 				"AI-mode frames must use the payload domain")

@@ -19,9 +19,9 @@ import (
 	"encoding/binary"
 	"math"
 
+	"github.com/infinityabundance/WeftCodec-Go/dtype"
 	"github.com/infinityabundance/WeftCodec-Go/hash"
 	"github.com/infinityabundance/WeftCodec-Go/limits"
-	"github.com/infinityabundance/WeftCodec-Go/modes"
 	"github.com/infinityabundance/WeftCodec-Go/wcb"
 	"github.com/infinityabundance/WeftCodec-Go/werrors"
 )
@@ -42,10 +42,10 @@ const (
 
 // DtypeSize parses a dtype name and returns its element size. Unknown dtypes
 // are UnsupportedFeature in the tensor-identity layer.
-func DtypeSize(dtype string) (uint64, error) {
-	size, err := modes.TensorElementSize(dtype)
-	if err != nil {
-		return 0, werrors.UnsupportedFeaturef("unknown tensor dtype %q", dtype)
+func DtypeSize(name string) (uint64, error) {
+	size, ok := dtype.ElementSize(name)
+	if !ok {
+		return 0, werrors.UnsupportedFeaturef("unknown tensor dtype %q", name)
 	}
 	return size, nil
 }
