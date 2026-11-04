@@ -66,3 +66,19 @@ The historical `017_unknown_mode.json` is retained byte-for-byte with an added
 `superseded_by` marker; the Go replay suite skips superseded vectors. All
 previously committed vectors keep their original bytes. The Go suite asserts
 byte-identical re-encoding for the five valid AI vectors.
+
+---
+
+## QUANTIZED_TENSOR mode-8 vectors (append-only addition, 2026-11-04)
+
+- Source repository: `https://github.com/infinityabundance/WeftCodec`
+- Source: Rust conformance generator at the WeftCodec revision recorded by
+  `bench/receipts/verify-*.json` for the F8 verification.
+- Files added: `105_quantized_i8_2x3`, `106_quantized_u8_zero_element`,
+  `107_quantized_i8_scalar` (valid); `030`–`037` (rejects for dtype, NaN scale,
+  zero-point range/type, payload length, payload hash, scale length, layout);
+  `017_unknown_mode_reserved9` (mode 9 remains reserved).
+- `017_unknown_mode_reserved8` keeps its original bytes and adds
+  `"superseded_by": "017_unknown_mode_reserved9"`.
+- The Go suite asserts byte-identical re-encoding for the three valid
+  QUANTIZED_TENSOR vectors and replays every reject vector.

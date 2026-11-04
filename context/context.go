@@ -18,31 +18,33 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/infinityabundance/WeftCodec-Go/generated"
 	"github.com/infinityabundance/WeftCodec-Go/hash"
 	"github.com/infinityabundance/WeftCodec-Go/limits"
 	"github.com/infinityabundance/WeftCodec-Go/wcb"
 	"github.com/infinityabundance/WeftCodec-Go/werrors"
 )
 
-// Schema strings.
+// Schema strings, policy names, and text limits are generated from
+// spec/schema/identity-v1.schema. Do not edit these values here.
 const (
-	ContextRootSchema = "weft.context-root.v1"
-	CausalSchema      = "weft.causal.v1"
-	CapabilitySchema  = "weft.capability.v1"
+	ContextRootSchema = generated.ContextRootSchema
+	CausalSchema      = generated.CausalSchema
+	CapabilitySchema  = generated.CapabilitySchema
 )
 
 // OrderingSelectorThenObjectID is the only v1 ordering/tie-break policy.
-const OrderingSelectorThenObjectID = "selector_then_object_id"
+const OrderingSelectorThenObjectID = generated.OrderingSelectorThenObjectID
 
 // DefaultResolver is the default resolver/policy version.
-const DefaultResolver = "weft-resolver-v1"
+const DefaultResolver = generated.DefaultResolver
 
 // URIPrefix is the weft:// scheme prefix.
-const URIPrefix = "weft://"
+const URIPrefix = generated.URIPrefix
 
 const (
-	maxNamespaceBytes = 128
-	maxResolverBytes  = 64
+	maxNamespaceBytes = generated.MaxNamespaceBytes
+	maxResolverBytes  = generated.MaxResolverBytes
 )
 
 func validateNamespace(namespace string) error {

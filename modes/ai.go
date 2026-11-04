@@ -327,6 +327,266 @@ func DecodeTensorFrame(f *frame.Frame, lim limits.Limits) ([]byte, error) {
 	return out, nil
 }
 
+// QuantizedTensorMeta is a parsed QUANTIZED_TENSOR descriptor.
+type QuantizedTensorMeta struct {
+	Dtype        string
+	Shape        []uint64
+	ElementCount uint64
+	PayloadBytes uint64
+	Scale        float64
+	ZeroPoint    int64
+}
+
+// QuantizedTensorSchema is the canonical quantized-tensor schema.
+const QuantizedTensorSchema = "weft.quantized-tensor.v1"
+
+// QuantizedTensorQuantization is the only affine layout implemented in v1.
+const QuantizedTensorQuantization = "affine-asymmetric-per-tensor"
+
+func metaI64(m map[string]wcb.Value, key string) (int64, error) {
+	v, ok := m[key]
+	if !ok || v.Kind != wcb.I64 {
+		return 0, werrors.Malformedf("metadata %q must be i64", key)
+	}
+	return v.I, nil
+}
+
+func validateQuantizedScale(scale float64) error {
+	if math.IsNaN(scale) || math.IsInf(scale, 0) {
+		return werrors.NewMalformed(
+			"quantized tensor scale must be finite (no NaN or infinity)")
+	}
+	if scale <= 0 {
+		return werrors.NewMalformed(
+			"quantized tensor scale must be greater than zero")
+	}
+	return nil
+}
+
+func validateZeroPoint(dtype string, zeroPoint int64) error {
+	var min, max int64
+	switch dtype {
+	case "i8":
+		min, max = math.MinInt8, math.MaxInt8
+	case "u8":
+		min, max = 0, math.MaxUint8
+	default:
+		return werrors.NewMalformed("quantized tensor dtype must be i8 or u8")
+	}
+	if zeroPoint < min || zeroPoint > max {
+		return werrors.Malformedf(
+			"quantized tensor zero_point %d is outside %s range %d..=%d",
+			zeroPoint, dtype, min, max)
+	}
+	return nil
+}
+
+// EncodeQuantizedTensor encodes an affine-quantized tensor (WEFT-AI-CODEC §4).
+// The payload is the packed i8/u8 element bytes in row-major order; the
+// descriptor carries the exact f64 scale bit pattern and the i64 zero point.
+func EncodeQuantizedTensor(
+	payload []byte, dtype string, shape []uint64, scale float64, zeroPoint int64,
+	lim limits.Limits,
+) ([]byte, error) {
+	if dtype != "i8" && dtype != "u8" {
+		return nil, werrors.Malformedf(
+			"quantized tensor dtype %q is not implemented (v1 allows i8, u8)", dtype)
+	}
+	if err := limits.CheckLen(uint64(len(payload)), lim.MaxDecodedBytes,
+		"quantized tensor payload"); err != nil {
+		return nil, err
+	}
+	if err := validateQuantizedScale(scale); err != nil {
+		return nil, err
+	}
+	if err := validateZeroPoint(dtype, zeroPoint); err != nil {
+		return nil, err
+	}
+	elementCount, err := tensorProduct(shape, lim)
+	if err != nil {
+		return nil, err
+	}
+	if elementCount != uint64(len(payload)) {
+		return nil, werrors.Malformedf(
+			"quantized tensor payload is %d bytes but shape %v has %d elements",
+			len(payload), shape, elementCount)
+	}
+	shapeItems := make([]wcb.Value, 0, len(shape))
+	for _, dim := range shape {
+		shapeItems = append(shapeItems, wcb.U64Value(dim))
+	}
+	var scaleBits [8]byte
+	binary.LittleEndian.PutUint64(scaleBits[:], math.Float64bits(scale))
+	meta := wcb.MapValue(map[string]wcb.Value{
+		"schema":        wcb.TextValue(QuantizedTensorSchema),
+		"dtype":         wcb.TextValue(dtype),
+		"shape":         wcb.ArrayValue(shapeItems),
+		"layout":        wcb.TextValue("row_major"),
+		"quantization":  wcb.TextValue(QuantizedTensorQuantization),
+		"scale_bits_le": wcb.BytesValue(scaleBits[:]),
+		"zero_point":    wcb.I64Value(zeroPoint),
+		"element_count": wcb.U64Value(elementCount),
+		"payload_bytes": wcb.U64Value(elementCount),
+		"payload_hash": wcb.BytesValue(
+			hash.Domain(hash.DomainQuantizedTensorPayload, payload).Bytes()),
+	})
+	body, err := buildAIBody(meta, payload, lim)
+	if err != nil {
+		return nil, err
+	}
+	parts := frame.PayloadParts(
+		frame.ModeQuantizedTensor, 0, 0, uint64(len(payload)),
+		hash.Domain(hash.DomainChunk, payload), body)
+	return frame.Encode(parts, lim)
+}
+
+func parseQuantizedTensorBody(f *frame.Frame, lim limits.Limits) (QuantizedTensorMeta, []byte, error) {
+	descriptorBytes, payload, err := splitAIBody(f.Body, f.Header.DecodedLen)
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	value, err := wcb.Decode(descriptorBytes, lim)
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	if value.Kind != wcb.Map {
+		return QuantizedTensorMeta{}, nil,
+			werrors.NewMalformed("quantized tensor metadata must be a WCB map")
+	}
+	m := value.Map
+	if err := checkExactKeys(m, []string{
+		"schema", "dtype", "shape", "layout", "quantization", "scale_bits_le",
+		"zero_point", "element_count", "payload_bytes", "payload_hash",
+	}, "quantized tensor"); err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	schema, err := metaText(m, "schema")
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	if schema != QuantizedTensorSchema {
+		return QuantizedTensorMeta{}, nil,
+			werrors.Malformedf("unsupported quantized tensor schema %q", schema)
+	}
+	dtype, err := metaText(m, "dtype")
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	if dtype != "i8" && dtype != "u8" {
+		return QuantizedTensorMeta{}, nil, werrors.Malformedf(
+			"quantized tensor dtype %q is specified but not implemented in v1 (only i8, u8)",
+			dtype)
+	}
+	layout, err := metaText(m, "layout")
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	if layout != "row_major" {
+		return QuantizedTensorMeta{}, nil, werrors.Malformedf(
+			"quantized tensor layout %q is specified but not implemented in v1 (only row_major)",
+			layout)
+	}
+	quantization, err := metaText(m, "quantization")
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	if quantization != QuantizedTensorQuantization {
+		return QuantizedTensorMeta{}, nil, werrors.Malformedf(
+			"quantized tensor quantization %q is specified but not implemented in v1",
+			quantization)
+	}
+	scaleBits, err := metaBytes(m, "scale_bits_le")
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	if len(scaleBits) != 8 {
+		return QuantizedTensorMeta{}, nil, werrors.Malformedf(
+			"quantized tensor scale_bits_le must be 8 bytes, got %d", len(scaleBits))
+	}
+	scale := math.Float64frombits(binary.LittleEndian.Uint64(scaleBits))
+	if err := validateQuantizedScale(scale); err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	zeroPoint, err := metaI64(m, "zero_point")
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	if err := validateZeroPoint(dtype, zeroPoint); err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	shape, err := metaShape(m)
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	declaredCount, err := metaU64(m, "element_count")
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	declaredBytes, err := metaU64(m, "payload_bytes")
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	expectedCount, err := tensorProduct(shape, lim)
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	if declaredCount != expectedCount {
+		return QuantizedTensorMeta{}, nil, werrors.Malformedf(
+			"quantized tensor element_count %d does not match shape product %d",
+			declaredCount, expectedCount)
+	}
+	if declaredBytes != declaredCount {
+		return QuantizedTensorMeta{}, nil, werrors.Malformedf(
+			"quantized tensor payload_bytes %d does not match element_count %d for one-byte elements",
+			declaredBytes, declaredCount)
+	}
+	if declaredBytes != uint64(len(payload)) {
+		return QuantizedTensorMeta{}, nil, werrors.Malformedf(
+			"quantized tensor payload is %d bytes but metadata declares %d",
+			len(payload), declaredBytes)
+	}
+	declaredHash, err := metaBytes(m, "payload_hash")
+	if err != nil {
+		return QuantizedTensorMeta{}, nil, err
+	}
+	if len(declaredHash) != hash.HashLen {
+		return QuantizedTensorMeta{}, nil, werrors.Malformedf(
+			"quantized tensor payload_hash must be %d bytes, got %d",
+			hash.HashLen, len(declaredHash))
+	}
+	actual := hash.Domain(hash.DomainQuantizedTensorPayload, payload)
+	if !bytesEqual(declaredHash, actual.Bytes()) {
+		return QuantizedTensorMeta{}, nil,
+			werrors.NewCorrupt("quantized tensor payload_hash mismatch")
+	}
+	return QuantizedTensorMeta{
+		Dtype:        dtype,
+		Shape:        shape,
+		ElementCount: declaredCount,
+		PayloadBytes: declaredBytes,
+		Scale:        scale,
+		ZeroPoint:    zeroPoint,
+	}, payload, nil
+}
+
+// QuantizedTensorMetadata validates and returns a QUANTIZED_TENSOR descriptor.
+func QuantizedTensorMetadata(f *frame.Frame, lim limits.Limits) (QuantizedTensorMeta, error) {
+	meta, _, err := parseQuantizedTensorBody(f, lim)
+	return meta, err
+}
+
+// DecodeQuantizedTensorFrame validates a QUANTIZED_TENSOR frame and returns
+// its exact packed element payload.
+func DecodeQuantizedTensorFrame(f *frame.Frame, lim limits.Limits) ([]byte, error) {
+	_, payload, err := parseQuantizedTensorBody(f, lim)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, len(payload))
+	copy(out, payload)
+	return out, nil
+}
+
 // EncodeTokenPayload encodes token ids to the canonical delta payload.
 //
 // The first id is an absolute minimal LEB128 u64. Every later id is

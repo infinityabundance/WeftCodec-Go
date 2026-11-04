@@ -73,6 +73,7 @@ func usage() {
 usage:
   weftcodec encode --input FILE --output FILE [--mode MODE] [--base FILE] [--dict FILE] [--level N] [--chunk-size N]
   weftcodec encode --mode tensor --input PAYLOAD --dtype D --shape 2,3 | --metadata FILE
+  weftcodec encode --mode quantized --input PAYLOAD --dtype i8|u8 --shape 2,3 --scale F [--zero-point N]
   weftcodec encode --mode tokens --input TOKENS.json
   weftcodec decode --input FILE --output FILE [--deps DIR]
   weftcodec inspect FILE [--json]
@@ -91,7 +92,7 @@ func runEncode(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("encode", flag.ContinueOnError)
 	input := fs.String("input", "", "input path or - for stdin")
 	output := fs.String("output", "", "output path or - for stdout")
-	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|auto")
+	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|auto")
 	basePath := fs.String("base", "", "base bytes for reference/delta/auto")
 	dictPath := fs.String("dict", "", "raw-content zstd dictionary for dictionary/auto")
 	level := fs.Int("level", 3, "zstd level")
@@ -99,9 +100,17 @@ func runEncode(ctx context.Context, args []string) error {
 	dtype := fs.String("dtype", "", "TENSOR dtype (f16|bf16|f32|f64|i8|u8|i16|i32|i64)")
 	shape := fs.String("shape", "", "TENSOR shape as comma-separated u64 extents")
 	metadata := fs.String("metadata", "", "TENSOR metadata JSON file")
+	scale := fs.Float64("scale", 0, "QUANTIZED_TENSOR affine scale (finite, > 0)")
+	zeroPoint := fs.Int64("zero-point", 0, "QUANTIZED_TENSOR zero point")
 	if err := fs.Parse(args); err != nil {
 		return werrors.NewParse(err.Error())
 	}
+	scaleSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "scale" {
+			scaleSet = true
+		}
+	})
 	if *input == "" || *output == "" {
 		return werrors.NewParse("encode requires --input and --output")
 	}
@@ -128,6 +137,9 @@ func runEncode(ctx context.Context, args []string) error {
 	switch *modeName {
 	case "tensor":
 		encoded, err = encodeTensor(data, *dtype, *shape, *metadata, lim)
+	case "quantized", "quantized_tensor":
+		encoded, err = encodeQuantizedTensor(data, *dtype, *shape, *metadata,
+			*scale, scaleSet, *zeroPoint, lim)
 	case "tokens":
 		encoded, err = encodeTokens(data, lim)
 	case "auto":
@@ -150,6 +162,8 @@ type tensorMetaInput struct {
 	Shape      []uint64 `json:"shape"`
 	Layout     string   `json:"layout"`
 	Endianness string   `json:"endianness"`
+	Scale      *float64 `json:"scale"`
+	ZeroPoint  *int64   `json:"zero_point"`
 }
 
 type tokensInput struct {
@@ -212,6 +226,61 @@ func encodeTokens(data []byte, lim limits.Limits) ([]byte, error) {
 	return modes.EncodeTokens(input.TokenIDs, input.VocabSchema, lim)
 }
 
+func encodeQuantizedTensor(
+	payload []byte, dtype, shapeText, metadataPath string,
+	scale float64, scaleSet bool, zeroPoint int64, lim limits.Limits,
+) ([]byte, error) {
+	shape := []uint64{}
+	if metadataPath != "" {
+		if dtype != "" || shapeText != "" || scaleSet {
+			return nil, werrors.NewMalformed(
+				"--metadata cannot be combined with --dtype/--shape/--scale")
+		}
+		b, err := os.ReadFile(metadataPath)
+		if err != nil {
+			return nil, err
+		}
+		var input tensorMetaInput
+		if err := json.Unmarshal(b, &input); err != nil {
+			return nil, werrors.Malformedf(
+				"quantized tensor metadata must be JSON {\"dtype\":string,\"shape\":[u64,...],\"scale\":number,\"zero_point\":integer}: %v",
+				err)
+		}
+		if input.Layout != "" && input.Layout != "row_major" {
+			return nil, werrors.Malformedf(
+				"quantized tensor layout %q is specified but not implemented in v1 (only row_major)",
+				input.Layout)
+		}
+		if input.Scale == nil {
+			return nil, werrors.NewMalformed(
+				"quantized tensor metadata requires a `scale` number")
+		}
+		scale = *input.Scale
+		shape = input.Shape
+		if input.ZeroPoint != nil {
+			zeroPoint = *input.ZeroPoint
+		}
+		return modes.EncodeQuantizedTensor(payload, input.Dtype, shape, scale, zeroPoint, lim)
+	}
+	if dtype == "" {
+		return nil, werrors.NewMalformed(
+			"QUANTIZED_TENSOR encoding requires --dtype or --metadata")
+	}
+	if !scaleSet {
+		return nil, werrors.NewMalformed("QUANTIZED_TENSOR encoding requires --scale")
+	}
+	if shapeText != "" {
+		for _, part := range strings.Split(shapeText, ",") {
+			value, err := strconv.ParseUint(strings.TrimSpace(part), 10, 64)
+			if err != nil {
+				return nil, werrors.Malformedf("bad --shape extent %q: %v", part, err)
+			}
+			shape = append(shape, value)
+		}
+	}
+	return modes.EncodeQuantizedTensor(payload, dtype, shape, scale, zeroPoint, lim)
+}
+
 func encodeMode(mode frame.Mode, data, base, dict []byte, level, chunkSize int, lim limits.Limits) ([]byte, error) {
 	switch mode {
 	case frame.ModeRaw:
@@ -245,6 +314,9 @@ func encodeMode(mode frame.Mode, data, base, dict []byte, level, chunkSize int, 
 	case frame.ModeTokenSequence:
 		return nil, werrors.NewMalformed(
 			"TOKEN_SEQUENCE encoding requires a JSON token input")
+	case frame.ModeQuantizedTensor:
+		return nil, werrors.NewMalformed(
+			"QUANTIZED_TENSOR encoding requires the dedicated CLI path with --dtype/--shape/--scale/--zero-point")
 	default:
 		return nil, werrors.UnsupportedModef("unknown mode %s", mode)
 	}

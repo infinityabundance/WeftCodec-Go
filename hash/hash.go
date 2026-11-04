@@ -38,6 +38,8 @@ const (
 	// Tensor/Token payload bindings (WEFT-AI-CODEC §2-§3).
 	DomainTensorPayload = "weft/tensor/payload/v1"
 	DomainTokensPayload = "weft/tokens/payload/v1"
+	// Quantized-tensor payload binding (WEFT-AI-CODEC §4).
+	DomainQuantizedTensorPayload = "weft/quantized-tensor/payload/v1"
 )
 
 // Hash32 is a 32-byte Weft digest. It is comparable and ordered

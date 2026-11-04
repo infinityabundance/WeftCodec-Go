@@ -342,6 +342,9 @@ func TestMetadataByteEquality(t *testing.T) {
 		"102_tensor_u8_zero_element",
 		"103_tokens_delta_boundaries",
 		"104_tokens_empty",
+		"105_quantized_i8_2x3",
+		"106_quantized_u8_zero_element",
+		"107_quantized_i8_scalar",
 	}
 	for _, name := range cases {
 		name := name
@@ -403,6 +406,17 @@ func TestMetadataByteEquality(t *testing.T) {
 					t.Fatalf("token ids: %v", idsErr)
 				}
 				encoded, err = modes.EncodeTokens(ids, meta.VocabSchema, lim)
+			case "quantized_tensor":
+				parsed, parseErr := frame.Parse(want, lim)
+				if parseErr != nil {
+					t.Fatalf("parse: %v", parseErr)
+				}
+				meta, metaErr := modes.QuantizedTensorMetadata(parsed, lim)
+				if metaErr != nil {
+					t.Fatalf("metadata: %v", metaErr)
+				}
+				encoded, err = modes.EncodeQuantizedTensor(
+					plaintext, meta.Dtype, meta.Shape, meta.Scale, meta.ZeroPoint, lim)
 			default:
 				t.Skipf("mode %s is not byte-deterministic", vector.Mode)
 			}

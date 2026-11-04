@@ -215,6 +215,8 @@ func DecodeBytes(ctx context.Context, frameBytes []byte, resolver dependency.Res
 		plaintext, err = DecodeTensorFrame(f, lim)
 	case frame.ModeTokenSequence:
 		plaintext, err = DecodeTokensFrame(f, lim)
+	case frame.ModeQuantizedTensor:
+		plaintext, err = DecodeQuantizedTensorFrame(f, lim)
 	default:
 		err = werrors.UnsupportedModef("mode %d is not decodable", f.Header.Mode)
 	}
