@@ -38,6 +38,7 @@ func floatMeta(
 		"sign_bits":          wcb.U64Value(sign),
 		"exponent_bits":      wcb.U64Value(exponent),
 		"mantissa_bits":      wcb.U64Value(mantissa),
+		"exponent_coder":     wcb.TextValue(modes.HuffmanCoderID),
 		"exponent_plane_len": wcb.U64Value(expLen),
 		"mantissa_plane_len": wcb.U64Value(mantLen),
 		"payload_hash":       wcb.BytesValue(payloadHash),
@@ -58,7 +59,7 @@ func rawFloatFrame(t *testing.T, meta wcb.Value, stored []byte, decodedLen uint6
 	body = append(body, stored...)
 	plaintext := make([]byte, decodedLen)
 	frameBytes, err := frame.Encode(frame.PayloadParts(
-		frame.ModeFloatTensor, 0, uint16(modes.FloatTensorZstdLevel), decodedLen,
+		frame.ModeFloatTensor, 0, uint16(modes.FloatTensorLevel), decodedLen,
 		hash.Domain(hash.DomainChunk, plaintext), body), lim)
 	if err != nil {
 		t.Fatalf("frame: %v", err)
@@ -171,7 +172,7 @@ func TestFloatTensorSpecialValues(t *testing.T) {
 	}
 }
 
-func TestFloatTensorSkewedExponentPlaneCompresses(t *testing.T) {
+func TestFloatTensorSkewedExponentPlaneUsesCanonicalHuffman(t *testing.T) {
 	lim := limits.Default()
 	words := make([]uint32, 64)
 	for i := 0; i < 60; i++ {
@@ -195,8 +196,9 @@ func TestFloatTensorSkewedExponentPlaneCompresses(t *testing.T) {
 	if meta.MantissaPlaneLen != 64 {
 		t.Fatalf("mantissa_plane_len = %d, want 64", meta.MantissaPlaneLen)
 	}
-	if meta.ExponentPlaneLen >= 64 {
-		t.Fatalf("exponent_plane_len = %d, want < 64", meta.ExponentPlaneLen)
+	// Two symbols of equal code length: 256-byte table plus 64 data bits.
+	if meta.ExponentPlaneLen != 256+8 {
+		t.Fatalf("exponent_plane_len = %d, want %d", meta.ExponentPlaneLen, 256+8)
 	}
 	decoded, err := decodeFrame(t, frameBytes, lim)
 	if err != nil {
@@ -274,14 +276,14 @@ func TestFloatTensorDecodeRejects(t *testing.T) {
 		t.Fatalf("overflow class = %v", werrors.ClassOf(err))
 	}
 
-	// Non-zstd exponent plane.
+	// Truncated canonical Huffman table (shorter than 256 bytes).
 	garbage := append([]byte{0xff, 0xff, 0xff}, mantPlane...)
 	garbageHash := hash.Domain(hash.DomainFloatTensorPayload, garbage)
 	meta = floatMeta("fp32", []uint64{2}, 2, 1, 8, 23,
 		3, uint64(len(mantPlane)), garbageHash.Bytes())
 	frameBytes = rawFloatFrame(t, meta, garbage, 8, lim)
 	if _, err := decodeFrame(t, frameBytes, lim); werrors.ClassOf(err) != werrors.Corrupt {
-		t.Fatalf("zstd class = %v", werrors.ClassOf(err))
+		t.Fatalf("huffman class = %v", werrors.ClassOf(err))
 	}
 
 	// decoded_len disagrees with the descriptor.
@@ -298,6 +300,15 @@ func TestFloatTensorDecodeRejects(t *testing.T) {
 	frameBytes = rawFloatFrame(t, meta, stored, 8, lim)
 	if _, err := decodeFrame(t, frameBytes, lim); werrors.ClassOf(err) != werrors.Corrupt {
 		t.Fatalf("hash class = %v", werrors.ClassOf(err))
+	}
+
+	// Unknown exponent coder.
+	meta = floatMeta("fp32", []uint64{2}, 2, 1, 8, 23,
+		uint64(len(expPlane)), uint64(len(mantPlane)), goodHash.Bytes())
+	meta.Map["exponent_coder"] = wcb.TextValue("zstd")
+	frameBytes = rawFloatFrame(t, meta, stored, 8, lim)
+	if _, err := decodeFrame(t, frameBytes, lim); werrors.ClassOf(err) != werrors.Malformed {
+		t.Fatalf("coder class = %v", werrors.ClassOf(err))
 	}
 }
 

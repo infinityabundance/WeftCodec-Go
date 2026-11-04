@@ -571,6 +571,9 @@ func runInspect(args []string) error {
 			"dependencies":  deps,
 			"chunks":        chunks,
 		}
+		if h.Mode == frame.ModeFloatTensor {
+			output["exponent_coder"] = modes.HuffmanCoderID
+		}
 		encoded, err := json.MarshalIndent(output, "", "  ")
 		if err != nil {
 			return werrors.NewIo("cannot serialize inspection: " + err.Error())
@@ -585,6 +588,9 @@ func runInspect(args []string) error {
 	fmt.Printf("format: WFT1 %d.%d\n", h.FormatMajor, h.FormatMinor)
 	fmt.Printf("domain: %d (%s)\n", h.Domain, domainName)
 	fmt.Printf("mode: %s (%d)\n", h.Mode, uint8(h.Mode))
+	if h.Mode == frame.ModeFloatTensor {
+		fmt.Printf("exponent_coder: %s\n", modes.HuffmanCoderID)
+	}
 	fmt.Printf("flags: 0x%04x %v\n", h.Flags, h.FlagNames())
 	fmt.Printf("features: 0x%04x %v\n", h.Features, h.FeatureNames())
 	fmt.Printf("level: %d\n", h.Level)

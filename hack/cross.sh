@@ -37,9 +37,11 @@ make_src() {
   # +1 zigzag deltas).
   head -c 24 "$CROSS/src/payload.bin" > "$CROSS/src/tensor.bin"
   head -c 6 "$CROSS/src/payload.bin" > "$CROSS/src/quantized.bin"
-  # FLOAT_TENSOR fixture: six fp32 elements with a skewed exponent plane
-  # (five zeros/denormals and one NaN) so the exponent plane compresses.
+  # FLOAT_TENSOR fixtures: a skewed exponent plane, an all-zero (single-symbol)
+  # plane, and a near-uniform plane with many distinct exponents.
   printf '\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\xc0\x7f' > "$CROSS/src/float_tensor.bin"
+  head -c 4096 /dev/zero > "$CROSS/src/float_tensor_single.bin"
+  head -c 24576 "$CROSS/src/payload.bin" > "$CROSS/src/float_tensor_uniform.bin"
   printf '{"vocab_schema":"weft.test.vocab.v1","token_ids":[1,2,3]}' > "$CROSS/src/tokens.json"
   printf '\x01\x02\x02' > "$CROSS/src/tokens_payload.bin"
 }
@@ -50,7 +52,7 @@ dep_hash() {
 }
 
 frame_modes() {
-  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens quantized float_tensor
+  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform
 }
 
 original_for() {
@@ -64,6 +66,8 @@ original_for() {
     tensor) echo tensor.bin ;;
     quantized) echo quantized.bin ;;
     float_tensor) echo float_tensor.bin ;;
+    float_tensor_single) echo float_tensor_single.bin ;;
+    float_tensor_uniform) echo float_tensor_uniform.bin ;;
     tokens) echo tokens_payload.bin ;;
     *) echo "unknown mode $1" >&2; return 1 ;;
   esac
@@ -83,6 +87,8 @@ rust_gen() {
   "$RUST" encode --input "$CROSS/src/tensor.bin" --output "$CROSS/rust/tensor.wft1" --mode tensor --dtype f32 --shape 2,3
   "$RUST" encode --input "$CROSS/src/quantized.bin" --output "$CROSS/rust/quantized.wft1" --mode quantized --dtype i8 --shape 2,3 --scale 0.25 --zero-point=-3
   "$RUST" encode --input "$CROSS/src/float_tensor.bin" --output "$CROSS/rust/float_tensor.wft1" --mode float-tensor --dtype fp32 --shape 2,3
+  "$RUST" encode --input "$CROSS/src/float_tensor_single.bin" --output "$CROSS/rust/float_tensor_single.wft1" --mode float-tensor --dtype fp32 --shape 1024
+  "$RUST" encode --input "$CROSS/src/float_tensor_uniform.bin" --output "$CROSS/rust/float_tensor_uniform.wft1" --mode float-tensor --dtype fp32 --shape 2,1024
   "$RUST" encode --input "$CROSS/src/tokens.json" --output "$CROSS/rust/tokens.wft1" --mode tokens
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/reference.wft1" "$RUST")"
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/delta.wft1" "$RUST")"
@@ -109,6 +115,8 @@ go_gen() {
   "$GO" encode --input "$CROSS/src/tensor.bin" --output "$CROSS/go/tensor.wft1" --mode tensor --dtype f32 --shape 2,3
   "$GO" encode --input "$CROSS/src/quantized.bin" --output "$CROSS/go/quantized.wft1" --mode quantized --dtype i8 --shape 2,3 --scale 0.25 --zero-point=-3
   "$GO" encode --input "$CROSS/src/float_tensor.bin" --output "$CROSS/go/float_tensor.wft1" --mode float-tensor --dtype fp32 --shape 2,3
+  "$GO" encode --input "$CROSS/src/float_tensor_single.bin" --output "$CROSS/go/float_tensor_single.wft1" --mode float-tensor --dtype fp32 --shape 1024
+  "$GO" encode --input "$CROSS/src/float_tensor_uniform.bin" --output "$CROSS/go/float_tensor_uniform.wft1" --mode float-tensor --dtype fp32 --shape 2,1024
   "$GO" encode --input "$CROSS/src/tokens.json" --output "$CROSS/go/tokens.wft1" --mode tokens
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/reference.wft1" "$GO")"
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/delta.wft1" "$GO")"
@@ -158,7 +166,7 @@ compare() {
   done
 
   echo "== deterministic frame bytes (Go == Rust) =="
-  for mode in raw raw_empty raw_chunked reference delta structured tensor tokens quantized; do
+  for mode in raw raw_empty raw_chunked reference delta structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform; do
     if cmp -s "$CROSS/rust/$mode.wft1" "$CROSS/go/$mode.wft1"; then
       echo "PASS identical $mode"
     else
@@ -174,16 +182,6 @@ compare() {
       echo "NOTE differing bytes $mode (allowed by spec §12)"
     fi
   done
-
-  # FLOAT_TENSOR embeds a zstd exponent plane produced by each implementation's
-  # zstd library. Decode equivalence above is mandatory; byte identity is not
-  # guaranteed by RFC 8878, so it is reported as an observation, never assumed.
-  echo "== float_tensor: zstd exponent plane is implementation-defined bytes =="
-  if cmp -s "$CROSS/rust/float_tensor.wft1" "$CROSS/go/float_tensor.wft1"; then
-    echo "PASS identical float_tensor (observed on this host)"
-  else
-    echo "NOTE differing bytes float_tensor (libzstd vs klauspost; decode equivalence passed)"
-  fi
 
   if [[ "$failures" -ne 0 ]]; then
     echo "cross-language gate: $failures failure(s)"

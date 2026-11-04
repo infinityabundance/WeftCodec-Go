@@ -14,9 +14,9 @@ import (
 // FloatTensorSchema is the canonical FLOAT_TENSOR descriptor schema.
 const FloatTensorSchema = "weft.ai.float_tensor.v1"
 
-// FloatTensorZstdLevel is the reference exponent-plane zstd level (informational,
-// like the frame level field).
-const FloatTensorZstdLevel = 3
+// FloatTensorLevel is the frame level for FLOAT_TENSOR. No zstd frame is
+// used, so the field is 0.
+const FloatTensorLevel = 0
 
 // FloatDtype describes one byte-aligned float element layout.
 type FloatDtype struct {
@@ -137,7 +137,7 @@ func takeBits(plane []byte, pos *uint64, count uint64) uint64 {
 }
 
 // SplitFloatTensorPayload splits a little-endian float payload into the
-// zstd-compressed exponent plane and the raw sign+mantissa plane.
+// huffman-canonical-v1 exponent plane and the raw sign+mantissa plane.
 func SplitFloatTensorPayload(payload []byte, dtype FloatDtype, elementCount uint64) ([]byte, []byte, error) {
 	expectedBytes, err := limits.MulChecked(elementCount, dtype.ElementSize(),
 		"float tensor decoded byte count")
@@ -178,10 +178,7 @@ func SplitFloatTensorPayload(payload []byte, dtype FloatDtype, elementCount uint
 		mantissaPlane = pushBits(mantissaPlane, &bitLen, sign, dtype.SignBits)
 		mantissaPlane = pushBits(mantissaPlane, &bitLen, mantissa, dtype.MantissaBits)
 	}
-	compressed, err := compressZstd(exponentPlane, FloatTensorZstdLevel)
-	if err != nil {
-		return nil, nil, err
-	}
+	compressed := HuffmanEncode(exponentPlane)
 	return compressed, mantissaPlane, nil
 }
 
@@ -307,6 +304,7 @@ func EncodeFloatTensor(payload []byte, dtype FloatDtype, shape []uint64, lim lim
 		"sign_bits":          wcb.U64Value(dtype.SignBits),
 		"exponent_bits":      wcb.U64Value(dtype.ExponentBits),
 		"mantissa_bits":      wcb.U64Value(dtype.MantissaBits),
+		"exponent_coder":     wcb.TextValue(HuffmanCoderID),
 		"exponent_plane_len": wcb.U64Value(uint64(len(exponentPlane))),
 		"mantissa_plane_len": wcb.U64Value(uint64(len(mantissaPlane))),
 		"payload_hash":       wcb.BytesValue(hash.Domain(hash.DomainFloatTensorPayload, stored).Bytes()),
@@ -316,7 +314,7 @@ func EncodeFloatTensor(payload []byte, dtype FloatDtype, shape []uint64, lim lim
 		return nil, err
 	}
 	parts := frame.PayloadParts(
-		frame.ModeFloatTensor, 0, uint16(FloatTensorZstdLevel), decodedBytes,
+		frame.ModeFloatTensor, 0, uint16(FloatTensorLevel), decodedBytes,
 		hash.Domain(hash.DomainChunk, payload), body)
 	return frame.Encode(parts, lim)
 }
@@ -338,7 +336,7 @@ func parseFloatTensorBody(f *frame.Frame, lim limits.Limits) (FloatTensorMeta, [
 	if err := checkExactKeys(m, []string{
 		"schema", "dtype", "shape", "element_count",
 		"sign_bits", "exponent_bits", "mantissa_bits",
-		"exponent_plane_len", "mantissa_plane_len", "payload_hash",
+		"exponent_coder", "exponent_plane_len", "mantissa_plane_len", "payload_hash",
 	}, "float tensor"); err != nil {
 		return FloatTensorMeta{}, nil, err
 	}
@@ -357,6 +355,15 @@ func parseFloatTensorBody(f *frame.Frame, lim limits.Limits) (FloatTensorMeta, [
 	dtype, err := ParseFloatDtype(dtypeName)
 	if err != nil {
 		return FloatTensorMeta{}, nil, err
+	}
+	exponentCoder, err := metaText(m, "exponent_coder")
+	if err != nil {
+		return FloatTensorMeta{}, nil, err
+	}
+	if exponentCoder != HuffmanCoderID {
+		return FloatTensorMeta{}, nil, werrors.Malformedf(
+			"unsupported float tensor exponent coder %q (v1 allows %q)",
+			exponentCoder, HuffmanCoderID)
 	}
 	signBits, err := metaByteField(m, "sign_bits")
 	if err != nil {
@@ -455,7 +462,11 @@ func parseFloatTensorBody(f *frame.Frame, lim limits.Limits) (FloatTensorMeta, [
 	}
 	exponentCompressed := stored[:exponentLen]
 	mantissaPlane := stored[exponentLen:]
-	exponentPlane, err := decompressZstd(exponentCompressed, declaredCount)
+	exponentBytes, err := limits.ToInt(declaredCount, "float tensor element count")
+	if err != nil {
+		return FloatTensorMeta{}, nil, err
+	}
+	exponentPlane, err := HuffmanDecode(exponentCompressed, exponentBytes)
 	if err != nil {
 		return FloatTensorMeta{}, nil, err
 	}

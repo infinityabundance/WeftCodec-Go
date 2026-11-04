@@ -325,12 +325,8 @@ func TestSelectorVectors(t *testing.T) {
 
 // TestMetadataByteEquality proves the Go encoder reproduces the frozen Rust
 // frame bytes for the byte-deterministic modes: RAW (chunked and unchunked),
-// REFERENCE, DELTA, STRUCTURED, TENSOR, TOKENS, and QUANTIZED_TENSOR.
-//
-// FLOAT_TENSOR is deliberately excluded: its exponent plane is a zstd frame,
-// and libzstd (Rust) and klauspost/compress (Go) produce different valid
-// frames. The Go conformance replay and hack/cross.sh assert decode
-// equivalence for it instead.
+// REFERENCE, DELTA, STRUCTURED, TENSOR, TOKENS, QUANTIZED_TENSOR, and
+// FLOAT_TENSOR (whose exponent plane uses huffman-canonical-v1).
 func TestMetadataByteEquality(t *testing.T) {
 	lim := limits.Default()
 	cases := []string{
@@ -350,6 +346,9 @@ func TestMetadataByteEquality(t *testing.T) {
 		"105_quantized_i8_2x3",
 		"106_quantized_u8_zero_element",
 		"107_quantized_i8_scalar",
+		"108_float_bf16_2x2",
+		"109_float_fp16_3d",
+		"110_float_fp32_4d",
 	}
 	for _, name := range cases {
 		name := name
@@ -422,6 +421,16 @@ func TestMetadataByteEquality(t *testing.T) {
 				}
 				encoded, err = modes.EncodeQuantizedTensor(
 					plaintext, meta.Dtype, meta.Shape, meta.Scale, meta.ZeroPoint, lim)
+			case "float_tensor":
+				parsed, parseErr := frame.Parse(want, lim)
+				if parseErr != nil {
+					t.Fatalf("parse: %v", parseErr)
+				}
+				meta, metaErr := modes.FloatTensorMetadata(parsed, lim)
+				if metaErr != nil {
+					t.Fatalf("metadata: %v", metaErr)
+				}
+				encoded, err = modes.EncodeFloatTensor(plaintext, meta.Dtype, meta.Shape, lim)
 			default:
 				t.Skipf("mode %s is not byte-deterministic", vector.Mode)
 			}
