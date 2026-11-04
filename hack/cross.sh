@@ -44,6 +44,17 @@ make_src() {
   head -c 24576 "$CROSS/src/payload.bin" > "$CROSS/src/float_tensor_uniform.bin"
   printf '{"vocab_schema":"weft.test.vocab.v1","token_ids":[1,2,3]}' > "$CROSS/src/tokens.json"
   printf '\x01\x02\x02' > "$CROSS/src/tokens_payload.bin"
+  # KV_CACHE (mode 12) and ACTIVATION_STREAM (mode 13) fixtures: two bf16
+  # pages of 4x2x4 elements (64 B each) and two bf16 chunks of 2x4 elements
+  # (16 B each).
+  dd if="$CROSS/src/payload.bin" of="$CROSS/src/kv_page0.bin" bs=1 count=64 status=none
+  dd if="$CROSS/src/payload.bin" of="$CROSS/src/kv_page1.bin" bs=1 skip=64 count=64 status=none
+  dd if="$CROSS/src/payload.bin" of="$CROSS/src/activation_chunk0.bin" bs=1 skip=128 count=16 status=none
+  dd if="$CROSS/src/payload.bin" of="$CROSS/src/activation_chunk1.bin" bs=1 skip=144 count=16 status=none
+  printf '{"model":"llama-cross","layer":3,"session":"sess-1","page_index":0,"page_count":2,"seq_start":0,"seq_end":4,"dtype":"bf16","head_count":2,"head_dim":4}' > "$CROSS/src/kv_page0.json"
+  printf '{"model":"llama-cross","layer":3,"session":"sess-1","page_index":1,"page_count":2,"seq_start":4,"seq_end":8,"dtype":"bf16","head_count":2,"head_dim":4}' > "$CROSS/src/kv_page1.json"
+  printf '{"stream":"activation","step":7,"rank":0,"world":1,"chunk_index":0,"chunk_count":2,"dtype":"bf16","shape":[2,4]}' > "$CROSS/src/activation_chunk0.json"
+  printf '{"stream":"activation","step":7,"rank":0,"world":1,"chunk_index":1,"chunk_count":2,"dtype":"bf16","shape":[2,4]}' > "$CROSS/src/activation_chunk1.json"
   # TENSOR_SHARDED (mode 10) word inputs: one byte per quantized value.
   sharded_words 32 q8 > "$CROSS/src/sharded_q8.bin"
   sharded_words 64 q4 > "$CROSS/src/sharded_q4.bin"
@@ -82,7 +93,7 @@ dep_hash() {
 }
 
 frame_modes() {
-  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8
+  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8 kv_cache_p0 kv_cache_p1 activation_c0 activation_c1
 }
 
 original_for() {
@@ -101,6 +112,10 @@ original_for() {
     weight_delta_bf16) echo weight_target_bf16.bin ;;
     weight_delta_fp32) echo weight_target_fp32.bin ;;
     weight_delta_q8) echo weight_target_q8.bin ;;
+    kv_cache_p0) echo kv_page0.bin ;;
+    kv_cache_p1) echo kv_page1.bin ;;
+    activation_c0) echo activation_chunk0.bin ;;
+    activation_c1) echo activation_chunk1.bin ;;
     tokens) echo tokens_payload.bin ;;
     *) echo "unknown mode $1" >&2; return 1 ;;
   esac
@@ -135,6 +150,10 @@ rust_gen() {
   "$RUST" encode --mode weight-delta --input "$CROSS/src/weight_target_fp32.bin" --output "$CROSS/rust/weight_delta_fp32.wft1" --base "$CROSS/rust/weight_base_fp32.wft1" --dtype fp32 --shape 2,2
   "$RUST" encode --mode tensor --input "$CROSS/src/weight_base_q8.bin" --output "$CROSS/rust/weight_base_q8.wft1" --dtype i8 --shape 4,8
   "$RUST" encode --mode weight-delta --input "$CROSS/src/weight_target_q8.bin" --output "$CROSS/rust/weight_delta_q8.wft1" --base "$CROSS/rust/weight_base_q8.wft1" --dtype q8_0 --shape 4,8
+  "$RUST" encode --mode kv-cache --input "$CROSS/src/kv_page0.bin" --output "$CROSS/rust/kv_cache_p0.wft1" --metadata "$CROSS/src/kv_page0.json"
+  "$RUST" encode --mode kv-cache --input "$CROSS/src/kv_page1.bin" --output "$CROSS/rust/kv_cache_p1.wft1" --metadata "$CROSS/src/kv_page1.json"
+  "$RUST" encode --mode activation-stream --input "$CROSS/src/activation_chunk0.bin" --output "$CROSS/rust/activation_c0.wft1" --metadata "$CROSS/src/activation_chunk0.json"
+  "$RUST" encode --mode activation-stream --input "$CROSS/src/activation_chunk1.bin" --output "$CROSS/rust/activation_c1.wft1" --metadata "$CROSS/src/activation_chunk1.json"
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/reference.wft1" "$RUST")"
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/delta.wft1" "$RUST")"
   cp "$CROSS/src/dict.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/dictionary.wft1" "$RUST")"
@@ -175,6 +194,10 @@ go_gen() {
   "$GO" encode --mode weight-delta --input "$CROSS/src/weight_target_fp32.bin" --output "$CROSS/go/weight_delta_fp32.wft1" --base "$CROSS/go/weight_base_fp32.wft1" --dtype fp32 --shape 2,2
   "$GO" encode --mode tensor --input "$CROSS/src/weight_base_q8.bin" --output "$CROSS/go/weight_base_q8.wft1" --dtype i8 --shape 4,8
   "$GO" encode --mode weight-delta --input "$CROSS/src/weight_target_q8.bin" --output "$CROSS/go/weight_delta_q8.wft1" --base "$CROSS/go/weight_base_q8.wft1" --dtype q8_0 --shape 4,8
+  "$GO" encode --mode kv-cache --input "$CROSS/src/kv_page0.bin" --output "$CROSS/go/kv_cache_p0.wft1" --metadata "$CROSS/src/kv_page0.json"
+  "$GO" encode --mode kv-cache --input "$CROSS/src/kv_page1.bin" --output "$CROSS/go/kv_cache_p1.wft1" --metadata "$CROSS/src/kv_page1.json"
+  "$GO" encode --mode activation-stream --input "$CROSS/src/activation_chunk0.bin" --output "$CROSS/go/activation_c0.wft1" --metadata "$CROSS/src/activation_chunk0.json"
+  "$GO" encode --mode activation-stream --input "$CROSS/src/activation_chunk1.bin" --output "$CROSS/go/activation_c1.wft1" --metadata "$CROSS/src/activation_chunk1.json"
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/reference.wft1" "$GO")"
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/delta.wft1" "$GO")"
   cp "$CROSS/src/dict.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/dictionary.wft1" "$GO")"
@@ -243,7 +266,7 @@ compare() {
   done
 
   echo "== deterministic frame bytes (Go == Rust) =="
-  for mode in raw raw_empty raw_chunked reference delta structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8; do
+  for mode in raw raw_empty raw_chunked reference delta structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8 kv_cache_p0 kv_cache_p1 activation_c0 activation_c1; do
     if cmp -s "$CROSS/rust/$mode.wft1" "$CROSS/go/$mode.wft1"; then
       echo "PASS identical $mode"
     else
@@ -271,6 +294,15 @@ compare() {
       echo "PASS identical logical root tensor_sharded $set"
     else
       echo "FAIL identical logical root tensor_sharded $set"; failures=$((failures + 1))
+    fi
+  done
+
+  echo "== KV_CACHE (mode 12) / ACTIVATION_STREAM (mode 13) byte identity =="
+  for mode in kv_cache_p0 kv_cache_p1 activation_c0 activation_c1; do
+    if cmp -s "$CROSS/rust/$mode.wft1" "$CROSS/go/$mode.wft1"; then
+      echo "YES byte-identical $mode"
+    else
+      echo "NO  byte-identical $mode"; failures=$((failures + 1))
     fi
   done
 

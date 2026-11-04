@@ -223,6 +223,18 @@ func DecodeBytes(ctx context.Context, frameBytes []byte, resolver dependency.Res
 		plaintext, err = DecodeShardedPlanes(f, lim)
 	case frame.ModeWeightDelta:
 		plaintext, err = DecodeWeightDeltaFrame(ctx, f, resolver, lim)
+	case frame.ModeKvCache:
+		var page DecodedKvPage
+		page, err = DecodeKvPage(f, lim)
+		if err == nil {
+			plaintext = page.Bytes
+		}
+	case frame.ModeActivationStream:
+		var chunk DecodedActivationChunk
+		chunk, err = DecodeActivationChunk(f, lim)
+		if err == nil {
+			plaintext = chunk.Bytes
+		}
 	default:
 		err = werrors.UnsupportedModef("mode %d is not decodable", f.Header.Mode)
 	}

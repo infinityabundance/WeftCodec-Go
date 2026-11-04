@@ -89,6 +89,11 @@ const (
 	ModeTensorSharded Mode = 10
 	// ModeWeightDelta is the exact tensor delta mode (WEFT-AI-CODEC §12).
 	ModeWeightDelta Mode = 11
+	// ModeKvCache is the paged KV cache page mode (WEFT-AI-CODEC §13).
+	ModeKvCache Mode = 12
+	// ModeActivationStream is the activation/gradient stream chunk mode
+	// (WEFT-AI-CODEC §14).
+	ModeActivationStream Mode = 13
 )
 
 // String returns the lowercase mode name.
@@ -118,6 +123,10 @@ func (m Mode) String() string {
 		return "tensor_sharded"
 	case ModeWeightDelta:
 		return "weight_delta"
+	case ModeKvCache:
+		return "kv_cache"
+	case ModeActivationStream:
+		return "activation_stream"
 	default:
 		return fmt.Sprintf("mode(%d)", uint8(m))
 	}
@@ -126,7 +135,7 @@ func (m Mode) String() string {
 // ModeFromU8 validates a wire mode value.
 func ModeFromU8(v uint8) (Mode, error) {
 	switch {
-	case v <= 11:
+	case v <= 13:
 		return Mode(v), nil
 	case v <= 127:
 		return 0, werrors.UnsupportedModef("reserved mode %d is not defined in v1", v)
@@ -162,6 +171,10 @@ func ModeFromName(name string) (Mode, error) {
 		return ModeTensorSharded, nil
 	case "weight_delta", "weight-delta", "weightdelta":
 		return ModeWeightDelta, nil
+	case "kv_cache", "kv-cache", "kvcache":
+		return ModeKvCache, nil
+	case "activation_stream", "activation-stream", "activation":
+		return ModeActivationStream, nil
 	default:
 		return 0, werrors.UnsupportedModef("unknown mode %q", name)
 	}
@@ -720,7 +733,7 @@ func validateModeRules(h Header, deps []Dependency, lim limits.Limits) error {
 		if h.ChunkCount != 0 {
 			return werrors.NewMalformed("DELTA must not be chunked")
 		}
-	case ModeTensor, ModeTokenSequence, ModeQuantizedTensor, ModeFloatTensor, ModeTensorSharded:
+	case ModeTensor, ModeTokenSequence, ModeQuantizedTensor, ModeFloatTensor, ModeTensorSharded, ModeKvCache, ModeActivationStream:
 		if h.Domain != DomainPayload {
 			return werrors.NewMalformed(
 				"AI-mode frames must use the payload domain")

@@ -104,7 +104,7 @@ func runEncode(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("encode", flag.ContinueOnError)
 	input := fs.String("input", "", "input path or - for stdin")
 	output := fs.String("output", "", "output path or - for stdout")
-	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|weight-delta|auto")
+	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|weight-delta|kv-cache|activation-stream|auto")
 	basePath := fs.String("base", "", "base bytes for reference/delta/auto")
 	dictPath := fs.String("dict", "", "raw-content zstd dictionary for dictionary/auto")
 	level := fs.Int("level", 3, "zstd level")
@@ -158,6 +158,10 @@ func runEncode(ctx context.Context, args []string) error {
 		encoded, err = encodeFloatTensor(data, *dtype, *shape, *metadata, lim)
 	case "weight-delta", "weight_delta":
 		encoded, err = encodeWeightDelta(ctx, data, *dtype, *shape, base, lim)
+	case "kv-cache", "kv_cache":
+		encoded, err = encodeKvCache(data, *metadata, lim)
+	case "activation-stream", "activation_stream":
+		encoded, err = encodeActivationStream(data, *metadata, lim)
 	case "tensor-sharded", "tensor_sharded":
 		return encodeTensorSharded(data, *dtype, *shape, *metadata, uint32(*axis), uint32(*shards),
 			*blockSize, *scales, *zeroPoints, visited, *output, lim)
@@ -195,6 +199,81 @@ type shardedMetaInput struct {
 	BlockSize  uint64   `json:"block_size"`
 	Scales     []uint64 `json:"scales"`
 	ZeroPoints []int64  `json:"zero_points"`
+}
+
+type kvCacheMetaInput struct {
+	Model     string `json:"model"`
+	Layer     uint32 `json:"layer"`
+	Session   string `json:"session"`
+	PageIndex uint64 `json:"page_index"`
+	PageCount uint64 `json:"page_count"`
+	SeqStart  uint64 `json:"seq_start"`
+	SeqEnd    uint64 `json:"seq_end"`
+	Dtype     string `json:"dtype"`
+	HeadCount uint32 `json:"head_count"`
+	HeadDim   uint32 `json:"head_dim"`
+}
+
+type activationStreamMetaInput struct {
+	Stream     string   `json:"stream"`
+	Step       uint64   `json:"step"`
+	Rank       uint32   `json:"rank"`
+	World      uint32   `json:"world"`
+	ChunkIndex uint64   `json:"chunk_index"`
+	ChunkCount uint64   `json:"chunk_count"`
+	Dtype      string   `json:"dtype"`
+	Shape      []uint64 `json:"shape"`
+}
+
+func encodeKvCache(data []byte, metadataPath string, lim limits.Limits) ([]byte, error) {
+	if metadataPath == "" {
+		return nil, werrors.NewMalformed("KV_CACHE encoding requires --metadata FILE")
+	}
+	raw, err := readLimited(metadataPath, lim.MaxStringBytes)
+	if err != nil {
+		return nil, err
+	}
+	var input kvCacheMetaInput
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return nil, werrors.Malformedf("KV_CACHE metadata is not valid JSON: %v", err)
+	}
+	dtype, err := modes.ParseKvDtype(input.Dtype)
+	if err != nil {
+		return nil, err
+	}
+	return modes.EncodeKvPage(modes.KvCacheInput{
+		Model: input.Model, Layer: input.Layer, Session: input.Session,
+		PageIndex: input.PageIndex, PageCount: input.PageCount,
+		SeqStart: input.SeqStart, SeqEnd: input.SeqEnd, Dtype: dtype,
+		HeadCount: input.HeadCount, HeadDim: input.HeadDim,
+	}, data, lim)
+}
+
+func encodeActivationStream(data []byte, metadataPath string, lim limits.Limits) ([]byte, error) {
+	if metadataPath == "" {
+		return nil, werrors.NewMalformed("ACTIVATION_STREAM encoding requires --metadata FILE")
+	}
+	raw, err := readLimited(metadataPath, lim.MaxStringBytes)
+	if err != nil {
+		return nil, err
+	}
+	var input activationStreamMetaInput
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return nil, werrors.Malformedf("ACTIVATION_STREAM metadata is not valid JSON: %v", err)
+	}
+	stream, err := modes.ParseStreamKind(input.Stream)
+	if err != nil {
+		return nil, err
+	}
+	dtype, err := modes.ParseStreamDtype(input.Dtype)
+	if err != nil {
+		return nil, err
+	}
+	head := modes.ActivationStreamHead{
+		Stream: stream, Step: input.Step, Rank: input.Rank, World: input.World,
+		ChunkCount: input.ChunkCount, Dtype: dtype, Shape: input.Shape,
+	}
+	return modes.EncodeActivationChunk(head, input.ChunkIndex, data, lim)
 }
 
 func encodeTensorSharded(
@@ -792,6 +871,44 @@ func runInspect(args []string) error {
 			output["delta_root"] = meta.DeltaRoot.Hex()
 			output["payload_len"] = meta.PayloadLen
 		}
+		if h.Mode == frame.ModeKvCache {
+			meta, err := modes.KvCacheMetadata(f, lim)
+			if err != nil {
+				return err
+			}
+			output["model"] = meta.Model
+			output["layer"] = meta.Layer
+			output["session"] = meta.Session
+			output["page_index"] = meta.PageIndex
+			output["page_count"] = meta.PageCount
+			output["seq_start"] = meta.SeqStart
+			output["seq_end"] = meta.SeqEnd
+			output["dtype"] = meta.Dtype.Name
+			output["head_count"] = meta.HeadCount
+			output["head_dim"] = meta.HeadDim
+			output["shape"] = meta.Shape
+			output["page_bytes"] = meta.PageBytes
+			output["plane_codec"] = meta.PlaneCodec
+			output["payload_len"] = meta.PayloadLen
+		}
+		if h.Mode == frame.ModeActivationStream {
+			meta, err := modes.ActivationChunkMetadata(f, lim)
+			if err != nil {
+				return err
+			}
+			output["stream"] = meta.Stream.Name
+			output["step"] = meta.Step
+			output["rank"] = meta.Rank
+			output["world"] = meta.World
+			output["chunk_index"] = meta.ChunkIndex
+			output["chunk_count"] = meta.ChunkCount
+			output["dtype"] = meta.Dtype.Name
+			output["shape"] = meta.Shape
+			output["element_count"] = meta.ElementCount
+			output["digest_root"] = meta.DigestRoot.Hex()
+			output["plane_codec"] = meta.PlaneCodec
+			output["payload_len"] = meta.PayloadLen
+		}
 		encoded, err := json.MarshalIndent(output, "", "  ")
 		if err != nil {
 			return werrors.NewIo("cannot serialize inspection: " + err.Error())
@@ -825,6 +942,44 @@ func runInspect(args []string) error {
 		fmt.Printf("planes: %d\n", meta.Planes)
 		fmt.Printf("plane_codec: %s\n", meta.PlaneCodec)
 		fmt.Printf("delta_root: %s\n", meta.DeltaRoot)
+		fmt.Printf("payload_len: %d\n", meta.PayloadLen)
+	}
+	if h.Mode == frame.ModeKvCache {
+		meta, err := modes.KvCacheMetadata(f, lim)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("model: %s\n", meta.Model)
+		fmt.Printf("layer: %d\n", meta.Layer)
+		fmt.Printf("session: %s\n", meta.Session)
+		fmt.Printf("page_index: %d\n", meta.PageIndex)
+		fmt.Printf("page_count: %d\n", meta.PageCount)
+		fmt.Printf("seq_start: %d\n", meta.SeqStart)
+		fmt.Printf("seq_end: %d\n", meta.SeqEnd)
+		fmt.Printf("dtype: %s\n", meta.Dtype.Name)
+		fmt.Printf("head_count: %d\n", meta.HeadCount)
+		fmt.Printf("head_dim: %d\n", meta.HeadDim)
+		fmt.Printf("shape: %v\n", meta.Shape)
+		fmt.Printf("page_bytes: %d\n", meta.PageBytes)
+		fmt.Printf("plane_codec: %s\n", meta.PlaneCodec)
+		fmt.Printf("payload_len: %d\n", meta.PayloadLen)
+	}
+	if h.Mode == frame.ModeActivationStream {
+		meta, err := modes.ActivationChunkMetadata(f, lim)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("stream: %s\n", meta.Stream.Name)
+		fmt.Printf("step: %d\n", meta.Step)
+		fmt.Printf("rank: %d\n", meta.Rank)
+		fmt.Printf("world: %d\n", meta.World)
+		fmt.Printf("chunk_index: %d\n", meta.ChunkIndex)
+		fmt.Printf("chunk_count: %d\n", meta.ChunkCount)
+		fmt.Printf("dtype: %s\n", meta.Dtype.Name)
+		fmt.Printf("shape: %v\n", meta.Shape)
+		fmt.Printf("element_count: %d\n", meta.ElementCount)
+		fmt.Printf("digest_root: %s\n", meta.DigestRoot)
+		fmt.Printf("plane_codec: %s\n", meta.PlaneCodec)
 		fmt.Printf("payload_len: %d\n", meta.PayloadLen)
 	}
 	fmt.Printf("flags: 0x%04x %v\n", h.Flags, h.FlagNames())
