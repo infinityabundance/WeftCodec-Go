@@ -55,6 +55,8 @@ func main() {
 		err = runContext(os.Args[2:])
 	case "causal":
 		err = runCausal(os.Args[2:])
+	case "capability":
+		err = runCapability(os.Args[2:])
 	case "tensor":
 		err = runTensor(os.Args[2:])
 	case "-h", "--help", "help":
@@ -93,6 +95,10 @@ usage:
   weftcodec context uri --selector FILE|- --namespace N --snapshot HEX [--descriptor] [--json]
   weftcodec context parse weft://... [--json]
   weftcodec causal id --parents HEX,... [--json]
+  weftcodec capability sign --envelope FILE --key FILE [--out FILE] [--json]
+  weftcodec capability verify --blob FILE [--revocations FILE] [--now-ns N] [--grantee HEX] [--json]
+  weftcodec capability id --envelope FILE [--json]
+  weftcodec capability key --key FILE
   weftcodec tensor root --input FILE --dtype D --shape 4,3,2 [--layout row-major|column-major|blocked] [--block-shape 2,2,2] [--json]
   weftcodec tensor root --shards-dir DIR --dtype D --shape 4,3,2 --axis A --shards N [--json]
   weftcodec tensor root --shards-dir DIR --frames [--json]
