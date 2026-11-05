@@ -237,6 +237,8 @@ func DecodeBytes(ctx context.Context, frameBytes []byte, resolver dependency.Res
 		if err == nil {
 			plaintext = chunk.Bytes
 		}
+	case frame.ModeTensorTiled:
+		plaintext, err = DecodeTiledTensor(f, lim)
 	default:
 		err = werrors.UnsupportedModef("mode %d is not decodable", f.Header.Mode)
 	}

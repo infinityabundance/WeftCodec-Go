@@ -80,7 +80,8 @@ usage:
   weftcodec encode --input FILE --output FILE [--mode MODE] [--base FILE] [--dict FILE] [--level N] [--chunk-size N]
   weftcodec encode --mode tensor --input PAYLOAD --dtype D --shape 2,3 | --metadata FILE
   weftcodec encode --mode quantized --input PAYLOAD --dtype i8|u8 --shape 2,3 --scale F [--zero-point N]
-  weftcodec encode --mode float-tensor --input PAYLOAD --dtype D --shape 2,3 | --metadata FILE
+	  weftcodec encode --mode float-tensor --input PAYLOAD --dtype D --shape 2,3 | --metadata FILE
+	  weftcodec encode --mode tensor-tiled --input PAYLOAD --dtype D --shape 4,4 --tile-shape 2,2
   weftcodec encode --mode weight-delta --input TARGET --base BASE_FRAME --dtype bf16|fp16|fp32|q8_0|q4_0 --shape 2,3
   weftcodec encode --mode tensor-sharded --input WORDS --output DIR --dtype q8_0|q4_0 --shape 4,8 --axis A --shards N --block-size B --scales BITS,... --zero-points Z,...
   weftcodec encode --mode tokens --input TOKENS.json
@@ -110,7 +111,7 @@ func runEncode(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("encode", flag.ContinueOnError)
 	input := fs.String("input", "", "input path or - for stdin")
 	output := fs.String("output", "", "output path or - for stdout")
-	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|weight-delta|kv-cache|activation-stream|auto")
+	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|tensor-tiled|weight-delta|kv-cache|activation-stream|auto")
 	basePath := fs.String("base", "", "base bytes for reference/delta/auto")
 	dictPath := fs.String("dict", "", "raw-content zstd dictionary for dictionary/auto")
 	level := fs.Int("level", 3, "zstd level")
@@ -126,6 +127,7 @@ func runEncode(ctx context.Context, args []string) error {
 	scales := fs.String("scales", "", "TENSOR_SHARDED per-block f32 scale bits, comma-separated u32")
 	zeroPoints := fs.String("zero-points", "", "TENSOR_SHARDED per-block zero points, comma-separated i64")
 	semanticPolicy := fs.String("semantic-policy", "", "SEMANTIC_DELTA policy: none|mantissa_truncate:N|block_quantize:B:L")
+	tileShape := fs.String("tile-shape", "", "TENSOR_TILED tile extents as comma-separated u64 values")
 	if err := fs.Parse(args); err != nil {
 		return werrors.NewParse(err.Error())
 	}
@@ -174,6 +176,8 @@ func runEncode(ctx context.Context, args []string) error {
 	case "tensor-sharded", "tensor_sharded":
 		return encodeTensorSharded(data, *dtype, *shape, *metadata, uint32(*axis), uint32(*shards),
 			*blockSize, *scales, *zeroPoints, visited, *output, lim)
+	case "tensor-tiled", "tensor_tiled":
+		encoded, err = encodeTensorTiled(data, *dtype, *shape, *tileShape, lim)
 	case "tokens":
 		encoded, err = encodeTokens(data, lim)
 	case "auto":
@@ -563,6 +567,24 @@ func encodeFloatTensor(
 		return nil, err
 	}
 	return modes.EncodeFloatTensor(payload, parsed, shape, lim)
+}
+
+func encodeTensorTiled(
+	payload []byte, dtype, shapeText, tileShapeText string, lim limits.Limits,
+) ([]byte, error) {
+	if dtype == "" {
+		return nil, werrors.NewMalformed(
+			"TENSOR_TILED encoding requires --dtype/--shape/--tile-shape")
+	}
+	shape, err := parseShapeText(shapeText, "--shape")
+	if err != nil {
+		return nil, err
+	}
+	tileShape, err := parseShapeText(tileShapeText, "--tile-shape")
+	if err != nil {
+		return nil, err
+	}
+	return modes.EncodeTiledTensor(payload, dtype, shape, tileShape, lim)
 }
 
 func encodeWeightDelta(

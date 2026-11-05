@@ -97,6 +97,9 @@ const (
 	// ModeSemanticDelta is the semantically matched exact tensor delta mode
 	// (WEFT-AI-CODEC §15).
 	ModeSemanticDelta Mode = 14
+	// ModeTensorTiled is the independently decodable tensor tile mode
+	// (WEFT-AI-CODEC §16).
+	ModeTensorTiled Mode = 15
 )
 
 // String returns the lowercase mode name.
@@ -132,6 +135,8 @@ func (m Mode) String() string {
 		return "activation_stream"
 	case ModeSemanticDelta:
 		return "semantic_delta"
+	case ModeTensorTiled:
+		return "tensor_tiled"
 	default:
 		return fmt.Sprintf("mode(%d)", uint8(m))
 	}
@@ -140,7 +145,7 @@ func (m Mode) String() string {
 // ModeFromU8 validates a wire mode value.
 func ModeFromU8(v uint8) (Mode, error) {
 	switch {
-	case v <= 14:
+	case v <= 15:
 		return Mode(v), nil
 	case v <= 127:
 		return 0, werrors.UnsupportedModef("reserved mode %d is not defined in v1", v)
@@ -182,6 +187,8 @@ func ModeFromName(name string) (Mode, error) {
 		return ModeActivationStream, nil
 	case "semantic_delta", "semantic-delta", "semanticdelta":
 		return ModeSemanticDelta, nil
+	case "tensor_tiled", "tensor-tiled", "tiled":
+		return ModeTensorTiled, nil
 	default:
 		return 0, werrors.UnsupportedModef("unknown mode %q", name)
 	}
@@ -740,7 +747,7 @@ func validateModeRules(h Header, deps []Dependency, lim limits.Limits) error {
 		if h.ChunkCount != 0 {
 			return werrors.NewMalformed("DELTA must not be chunked")
 		}
-	case ModeTensor, ModeTokenSequence, ModeQuantizedTensor, ModeFloatTensor, ModeTensorSharded, ModeKvCache, ModeActivationStream:
+	case ModeTensor, ModeTokenSequence, ModeQuantizedTensor, ModeFloatTensor, ModeTensorSharded, ModeKvCache, ModeActivationStream, ModeTensorTiled:
 		if h.Domain != DomainPayload {
 			return werrors.NewMalformed(
 				"AI-mode frames must use the payload domain")
