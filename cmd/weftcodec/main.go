@@ -785,6 +785,9 @@ func addLimitFlags(fs *flag.FlagSet, lim *limits.Limits) {
 	fs.Uint64Var(&lim.MaxChunks, "max-chunks", lim.MaxChunks, "maximum chunk table entries")
 	fs.Uint64Var(&lim.MaxDictionaryBytes, "max-dictionary-bytes", lim.MaxDictionaryBytes, "maximum dictionary bytes")
 	fs.Uint64Var(&lim.MaxDeltaOps, "max-delta-ops", lim.MaxDeltaOps, "maximum delta operations")
+	fs.Uint64Var(&lim.MaxTensorElements, "max-tensor-elements", lim.MaxTensorElements, "maximum tensor element count")
+	fs.Uint64Var(&lim.MaxTensorRank, "max-tensor-rank", lim.MaxTensorRank, "maximum tensor rank")
+	fs.Uint64Var(&lim.MaxTokens, "max-tokens", lim.MaxTokens, "maximum token count")
 	fs.Uint64Var(&lim.MaxStructuredDepth, "max-structured-depth", lim.MaxStructuredDepth, "maximum WCB nesting depth")
 	fs.Uint64Var(&lim.MaxStructuredItems, "max-structured-items", lim.MaxStructuredItems, "maximum WCB item count")
 	fs.Uint64Var(&lim.MaxSelectorBytes, "max-selector-bytes", lim.MaxSelectorBytes, "maximum selector source bytes")
@@ -1615,8 +1618,14 @@ func runCausal(args []string) error {
 	if err := fs.Parse(args[1:]); err != nil {
 		return werrors.NewParse(err.Error())
 	}
-	if *parentsText == "" {
-		return werrors.NewParse("causal id requires --parents")
+	parentsProvided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "parents" {
+			parentsProvided = true
+		}
+	})
+	if !parentsProvided {
+		return werrors.NewParse("causal id requires --parents (an explicit empty value is an empty closure)")
 	}
 	parents, err := parseHashList(*parentsText, "causal parents")
 	if err != nil {

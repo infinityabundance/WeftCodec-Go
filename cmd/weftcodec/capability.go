@@ -269,13 +269,18 @@ func runCapabilityID(args []string) error {
 		return err
 	}
 	if *asJSON {
+		canonical, err := envelope.CanonicalBytes(limits.Default())
+		if err != nil {
+			return err
+		}
 		out := map[string]any{
-			"schema":      capability.EnvelopeSchema,
-			"envelope_id": id.Hex(),
-			"sign_input":  signInput.Hex(),
-			"tenant":      envelope.Tenant,
-			"grantor":     envelope.Grantor.Hex(),
-			"grantee":     envelope.Grantee.Hex(),
+			"schema":        capability.EnvelopeSchema,
+			"envelope_id":   id.Hex(),
+			"sign_input":    signInput.Hex(),
+			"canonical_hex": hex.EncodeToString(canonical),
+			"tenant":        envelope.Tenant,
+			"grantor":       envelope.Grantor.Hex(),
+			"grantee":       envelope.Grantee.Hex(),
 		}
 		encoded, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(encoded))
