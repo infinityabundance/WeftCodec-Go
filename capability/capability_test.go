@@ -226,3 +226,35 @@ func TestJSONRoundTrip(t *testing.T) {
 		t.Fatalf("json round trip changed canonical bytes")
 	}
 }
+
+func TestSignVerifyBytes(t *testing.T) {
+	seed := bytes.Repeat([]byte{0x11}, ed25519.SeedSize)
+	message := bytes.Repeat([]byte{0xab}, 32)
+	signature, err := SignBytes(seed, message)
+	if err != nil {
+		t.Fatalf("sign bytes: %v", err)
+	}
+	if len(signature) != SignatureLen {
+		t.Fatalf("signature length %d", len(signature))
+	}
+	public, err := PublicKeyForSeed(seed)
+	if err != nil {
+		t.Fatalf("public key: %v", err)
+	}
+	if err := VerifyBytes(public, message, signature); err != nil {
+		t.Fatalf("verify bytes: %v", err)
+	}
+	tampered := append([]byte(nil), message...)
+	tampered[0] ^= 0xff
+	if err := VerifyBytes(public, tampered, signature); err == nil {
+		t.Fatalf("expected tampered message to fail")
+	}
+	otherSeed := bytes.Repeat([]byte{0x22}, ed25519.SeedSize)
+	other, err := PublicKeyForSeed(otherSeed)
+	if err != nil {
+		t.Fatalf("other public key: %v", err)
+	}
+	if err := VerifyBytes(other, message, signature); err == nil {
+		t.Fatalf("expected wrong key to fail")
+	}
+}

@@ -693,6 +693,32 @@ func Sign(envelope *Envelope, seed []byte) (*Blob, error) {
 	return NewBlob(envelope, signature)
 }
 
+// SignBytes signs an arbitrary message with a 32-byte Ed25519 seed.
+//
+// It is the same Ed25519 construction used by Sign, exposed so other Weft
+// artifacts (for example a signed receipt bundle) can be verified without a
+// second crypto path.
+func SignBytes(seed, message []byte) ([]byte, error) {
+	if len(seed) != ed25519.SeedSize {
+		return nil, werrors.Malformedf(
+			"Ed25519 seed must be %d bytes, got %d", ed25519.SeedSize, len(seed))
+	}
+	key := ed25519.NewKeyFromSeed(seed)
+	return ed25519.Sign(key, message), nil
+}
+
+// VerifyBytes verifies a detached Ed25519 signature over an arbitrary message.
+func VerifyBytes(publicKey hash.Hash32, message, signature []byte) error {
+	if len(signature) != SignatureLen {
+		return werrors.Malformedf(
+			"Ed25519 signature must be %d bytes, got %d", SignatureLen, len(signature))
+	}
+	if !ed25519.Verify(ed25519.PublicKey(publicKey.Bytes()), message, signature) {
+		return werrors.NewCorrupt("Ed25519 signature does not verify")
+	}
+	return nil
+}
+
 // Verify verifies a stored blob offline.
 //
 // Checks, in normative order: canonical form, Ed25519 signature under grantor,
