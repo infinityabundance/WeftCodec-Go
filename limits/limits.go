@@ -26,6 +26,7 @@ const (
 	DefaultMaxTensorElements    uint64 = 1 << 32
 	DefaultMaxTensorRank        uint64 = 8
 	DefaultMaxTokens            uint64 = 1 << 24
+	DefaultMaxSparseRuns        uint64 = 16_777_216
 	DefaultMaxSelectorBytes     uint64 = 64 << 10
 	DefaultMaxSelectorDepth     uint64 = 64
 	DefaultMaxFieldSegments     uint64 = 16
@@ -52,6 +53,7 @@ type Limits struct {
 	MaxTensorElements    uint64
 	MaxTensorRank        uint64
 	MaxTokens            uint64
+	MaxSparseRuns        uint64
 	MaxSelectorBytes     uint64
 	MaxSelectorDepth     uint64
 	MaxFieldSegments     uint64
@@ -79,6 +81,7 @@ func Default() Limits {
 		MaxTensorElements:    DefaultMaxTensorElements,
 		MaxTensorRank:        DefaultMaxTensorRank,
 		MaxTokens:            DefaultMaxTokens,
+		MaxSparseRuns:        DefaultMaxSparseRuns,
 		MaxSelectorBytes:     DefaultMaxSelectorBytes,
 		MaxSelectorDepth:     DefaultMaxSelectorDepth,
 		MaxFieldSegments:     DefaultMaxFieldSegments,

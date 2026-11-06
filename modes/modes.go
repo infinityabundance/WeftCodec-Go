@@ -225,6 +225,8 @@ func DecodeBytes(ctx context.Context, frameBytes []byte, resolver dependency.Res
 		plaintext, err = DecodeWeightDeltaFrame(ctx, f, resolver, lim)
 	case frame.ModeSemanticDelta:
 		plaintext, err = DecodeSemanticDeltaFrame(ctx, f, resolver, lim)
+	case frame.ModeSparseDelta:
+		plaintext, err = DecodeSparseDeltaFrame(ctx, f, resolver, lim)
 	case frame.ModeKvCache:
 		var page DecodedKvPage
 		page, err = DecodeKvPage(f, lim)

@@ -111,7 +111,7 @@ func runEncode(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("encode", flag.ContinueOnError)
 	input := fs.String("input", "", "input path or - for stdin")
 	output := fs.String("output", "", "output path or - for stdout")
-	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|tensor-tiled|weight-delta|kv-cache|activation-stream|auto")
+	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|tensor-tiled|weight-delta|sparse-delta|kv-cache|activation-stream|auto")
 	basePath := fs.String("base", "", "base bytes for reference/delta/auto")
 	dictPath := fs.String("dict", "", "raw-content zstd dictionary for dictionary/auto")
 	level := fs.Int("level", 3, "zstd level")
@@ -167,6 +167,8 @@ func runEncode(ctx context.Context, args []string) error {
 		encoded, err = encodeFloatTensor(data, *dtype, *shape, *metadata, lim)
 	case "weight-delta", "weight_delta":
 		encoded, err = encodeWeightDelta(ctx, data, *dtype, *shape, base, lim)
+	case "sparse-delta", "sparse_delta":
+		encoded, err = encodeSparseDelta(ctx, data, *dtype, *shape, base, lim)
 	case "semantic-delta", "semantic_delta":
 		encoded, err = encodeSemanticDelta(ctx, data, *dtype, *shape, base, *semanticPolicy, lim)
 	case "kv-cache", "kv_cache":
@@ -611,6 +613,30 @@ func encodeWeightDelta(
 	return modes.EncodeWeightDelta(ctx, target, dtype, shape, baseFrame, lim)
 }
 
+func encodeSparseDelta(
+	ctx context.Context, target []byte, dtypeText, shapeText string, baseFrame []byte, lim limits.Limits,
+) ([]byte, error) {
+	if baseFrame == nil {
+		return nil, werrors.NewMalformed("SPARSE_DELTA encoding requires --base FRAME")
+	}
+	if dtypeText == "" {
+		return nil, werrors.NewMalformed(
+			"SPARSE_DELTA encoding requires --dtype (bf16|fp16|fp32|q8_0|q4_0)")
+	}
+	dtype, err := modes.ParseWeightDtype(dtypeText)
+	if err != nil {
+		return nil, err
+	}
+	if shapeText == "" {
+		return nil, werrors.NewMalformed("SPARSE_DELTA encoding requires --shape (rank >= 1)")
+	}
+	shape, err := parseShapeText(shapeText, "shape")
+	if err != nil {
+		return nil, err
+	}
+	return modes.EncodeSparseDelta(ctx, target, dtype, shape, baseFrame, lim)
+}
+
 func semanticPolicyJSON(policy modes.SemanticPolicy) map[string]any {
 	out := map[string]any{"scheme": policy.Scheme}
 	switch policy.Scheme {
@@ -810,6 +836,7 @@ func addLimitFlags(fs *flag.FlagSet, lim *limits.Limits) {
 	fs.Uint64Var(&lim.MaxTensorElements, "max-tensor-elements", lim.MaxTensorElements, "maximum tensor element count")
 	fs.Uint64Var(&lim.MaxTensorRank, "max-tensor-rank", lim.MaxTensorRank, "maximum tensor rank")
 	fs.Uint64Var(&lim.MaxTokens, "max-tokens", lim.MaxTokens, "maximum token count")
+	fs.Uint64Var(&lim.MaxSparseRuns, "max-sparse-runs", lim.MaxSparseRuns, "maximum SPARSE_DELTA non-zero runs")
 	fs.Uint64Var(&lim.MaxStructuredDepth, "max-structured-depth", lim.MaxStructuredDepth, "maximum WCB nesting depth")
 	fs.Uint64Var(&lim.MaxStructuredItems, "max-structured-items", lim.MaxStructuredItems, "maximum WCB item count")
 	fs.Uint64Var(&lim.MaxSelectorBytes, "max-selector-bytes", lim.MaxSelectorBytes, "maximum selector source bytes")
@@ -843,7 +870,8 @@ func runDecode(ctx context.Context, args []string) error {
 		return err
 	}
 	var plaintext []byte
-	if root.Header.Mode == frame.ModeWeightDelta || root.Header.Mode == frame.ModeSemanticDelta {
+	if root.Header.Mode == frame.ModeWeightDelta || root.Header.Mode == frame.ModeSemanticDelta ||
+		root.Header.Mode == frame.ModeSparseDelta {
 		if *resolve && *frameSource == "" {
 			return werrors.NewMalformed("delta modes require --frame-source with --resolve")
 		}
@@ -855,6 +883,9 @@ func runDecode(ctx context.Context, args []string) error {
 			if root.Header.Mode == frame.ModeSemanticDelta {
 				plaintext, err = modes.DecodeSemanticDeltaFrameWithBase(
 					ctx, root, baseFrame, resolverFor(*deps), lim)
+			} else if root.Header.Mode == frame.ModeSparseDelta {
+				plaintext, err = modes.DecodeSparseDeltaFrameWithBase(
+					ctx, root, baseFrame, resolverFor(*deps), lim)
 			} else {
 				plaintext, err = modes.DecodeWeightDeltaFrameWithBase(
 					ctx, root, baseFrame, resolverFor(*deps), lim)
@@ -865,7 +896,7 @@ func runDecode(ctx context.Context, args []string) error {
 			return writeOutput(*output, plaintext)
 		}
 	} else if *resolve {
-		return werrors.NewMalformed("--resolve applies only to WEIGHT_DELTA and SEMANTIC_DELTA frames")
+		return werrors.NewMalformed("--resolve applies only to WEIGHT_DELTA, SEMANTIC_DELTA, and SPARSE_DELTA frames")
 	}
 	if *frameSource != "" {
 		plaintext, err = modes.DecodeDAG(ctx, dependency.NewDirectoryFrameSource(*frameSource, lim.MaxFrameBytes), frameBytes, lim)
@@ -1023,6 +1054,20 @@ func runInspect(args []string) error {
 			output["delta_root"] = meta.DeltaRoot.Hex()
 			output["payload_len"] = meta.PayloadLen
 		}
+		if h.Mode == frame.ModeSparseDelta {
+			meta, err := modes.SparseDeltaMetadata(f, lim)
+			if err != nil {
+				return err
+			}
+			output["dtype"] = meta.Dtype.Name
+			output["shape"] = meta.Shape
+			output["element_count"] = meta.ElementCount
+			output["storage_bytes"] = meta.StorageBytes
+			output["op"] = meta.Op
+			output["sparse_codec"] = meta.SparseCodec
+			output["base_content_root"] = meta.Base.Hex()
+			output["delta_root"] = meta.DeltaRoot.Hex()
+		}
 		if h.Mode == frame.ModeKvCache {
 			meta, err := modes.KvCacheMetadata(f, lim)
 			if err != nil {
@@ -1114,6 +1159,20 @@ func runInspect(args []string) error {
 		fmt.Printf("plane_codec: %s\n", meta.PlaneCodec)
 		fmt.Printf("delta_root: %s\n", meta.DeltaRoot)
 		fmt.Printf("payload_len: %d\n", meta.PayloadLen)
+	}
+	if h.Mode == frame.ModeSparseDelta {
+		meta, err := modes.SparseDeltaMetadata(f, lim)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("dtype: %s\n", meta.Dtype.Name)
+		fmt.Printf("shape: %v\n", meta.Shape)
+		fmt.Printf("element_count: %d\n", meta.ElementCount)
+		fmt.Printf("storage_bytes: %d\n", meta.StorageBytes)
+		fmt.Printf("op: %s\n", meta.Op)
+		fmt.Printf("sparse_codec: %s\n", meta.SparseCodec)
+		fmt.Printf("base_content_root: %s\n", meta.Base)
+		fmt.Printf("delta_root: %s\n", meta.DeltaRoot)
 	}
 	if h.Mode == frame.ModeKvCache {
 		meta, err := modes.KvCacheMetadata(f, lim)

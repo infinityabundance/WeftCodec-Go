@@ -100,6 +100,9 @@ const (
 	// ModeTensorTiled is the independently decodable tensor tile mode
 	// (WEFT-AI-CODEC §16).
 	ModeTensorTiled Mode = 15
+	// ModeSparseDelta is the zero-run coded exact tensor delta mode
+	// (WEFT-AI-CODEC §17).
+	ModeSparseDelta Mode = 16
 )
 
 // String returns the lowercase mode name.
@@ -137,6 +140,8 @@ func (m Mode) String() string {
 		return "semantic_delta"
 	case ModeTensorTiled:
 		return "tensor_tiled"
+	case ModeSparseDelta:
+		return "sparse_delta"
 	default:
 		return fmt.Sprintf("mode(%d)", uint8(m))
 	}
@@ -145,7 +150,7 @@ func (m Mode) String() string {
 // ModeFromU8 validates a wire mode value.
 func ModeFromU8(v uint8) (Mode, error) {
 	switch {
-	case v <= 15:
+	case v <= 16:
 		return Mode(v), nil
 	case v <= 127:
 		return 0, werrors.UnsupportedModef("reserved mode %d is not defined in v1", v)
@@ -189,6 +194,8 @@ func ModeFromName(name string) (Mode, error) {
 		return ModeSemanticDelta, nil
 	case "tensor_tiled", "tensor-tiled", "tiled":
 		return ModeTensorTiled, nil
+	case "sparse_delta", "sparse-delta", "sparsedelta":
+		return ModeSparseDelta, nil
 	default:
 		return 0, werrors.UnsupportedModef("unknown mode %q", name)
 	}
@@ -767,10 +774,13 @@ func validateModeRules(h Header, deps []Dependency, lim limits.Limits) error {
 			return werrors.NewMalformed(
 				"AI-mode body is shorter than its 4-byte metadata length")
 		}
-	case ModeWeightDelta, ModeSemanticDelta:
+	case ModeWeightDelta, ModeSemanticDelta, ModeSparseDelta:
 		modeName := "WEIGHT_DELTA"
-		if h.Mode == ModeSemanticDelta {
+		switch h.Mode {
+		case ModeSemanticDelta:
 			modeName = "SEMANTIC_DELTA"
+		case ModeSparseDelta:
+			modeName = "SPARSE_DELTA"
 		}
 		if h.Domain != DomainPayload {
 			return werrors.Malformedf(
