@@ -27,7 +27,96 @@ const HuffmanCoderID = "huffman-canonical-v1"
 const (
 	huffmanTableBytes  = 256
 	huffmanMaxCodeBits = 24
+	// huffmanPrimaryBitsMax is the widest primary lookup table. Codes no
+	// longer than this decode with one table probe; longer codes fall back to
+	// the exact canonical loop.
+	huffmanPrimaryBitsMax = 12
 )
+
+// huffmanFastEntry is one primary lookup-table entry. length == 0 is the
+// sentinel for a code longer than the table width and is never consumed by
+// the fast path.
+type huffmanFastEntry struct {
+	symbol uint8
+	length uint8
+}
+
+// huffmanBitReader is an MSB-aligned 64-bit reader over the encoded stream.
+// The next unread bit is bit 63 of acc. Bytes are loaded only from the stream,
+// so the accumulator never contains invented bits; the externally tracked
+// consumed-bit count plus accBits always equals 8 * nextByte.
+type huffmanBitReader struct {
+	stream   []byte
+	nextByte int
+	acc      uint64
+	accBits  uint
+}
+
+// refill loads whole bytes while at least eight bits still fit.
+func (r *huffmanBitReader) refill() {
+	for r.accBits <= 56 && r.nextByte < len(r.stream) {
+		r.acc |= uint64(r.stream[r.nextByte]) << (56 - r.accBits)
+		r.nextByte++
+		r.accBits += 8
+	}
+}
+
+// nextBit reads one bit. The caller has already proved a bit remains.
+func (r *huffmanBitReader) nextBit() uint32 {
+	if r.accBits == 0 {
+		r.refill()
+	}
+	bit := uint32(r.acc >> 63)
+	r.acc <<= 1
+	r.accBits--
+	return bit
+}
+
+// huffmanCanonicalTables carries the canonical (first code, counts, first
+// index, symbols) arrays for the rare bit-at-a-time path.
+type huffmanCanonicalTables struct {
+	counts     [huffmanMaxCodeBits + 1]uint32
+	firstCode  [huffmanMaxCodeBits + 1]uint32
+	firstIndex [huffmanMaxCodeBits + 1]uint32
+	symbols    []byte
+	maxLen     int
+}
+
+// huffmanDecodeOneCanonical decodes exactly one symbol with the canonical
+// arrays. It is the original bit-at-a-time loop, kept off the hot path: it runs
+// only for codes longer than the primary table covers and for stream tails with
+// fewer than primaryBits buffered bits. Its checks and error classes are
+// exactly the pre-table decoder's.
+//
+//go:noinline
+func huffmanDecodeOneCanonical(tables *huffmanCanonicalTables, reader *huffmanBitReader, bitsConsumed *int, decoded, expectedLen int) (byte, error) {
+	currentCode := uint32(0)
+	currentLen := 0
+	for {
+		if currentLen > 0 {
+			slot := currentLen
+			if currentCode >= tables.firstCode[slot] {
+				offset := currentCode - tables.firstCode[slot]
+				if offset < tables.counts[slot] {
+					return tables.symbols[int(tables.firstIndex[slot]+offset)], nil
+				}
+			}
+			if currentLen >= tables.maxLen {
+				return 0, werrors.NewCorrupt(
+					"huffman-canonical-v1 bitstream contains an invalid code")
+			}
+		}
+		if *bitsConsumed >= len(reader.stream)*8 {
+			return 0, werrors.Corruptf(
+				"huffman-canonical-v1 bitstream ended after %d of %d bytes",
+				decoded, expectedLen)
+		}
+		bit := reader.nextBit()
+		currentCode = (currentCode << 1) | bit
+		currentLen++
+		*bitsConsumed = *bitsConsumed + 1
+	}
+}
 
 type huffmanNode struct {
 	weight    uint64
@@ -252,6 +341,11 @@ func HuffmanDecode(encoded []byte, expectedLen int) ([]byte, error) {
 // of encoded and returns the decoded bytes plus the number of bytes consumed
 // (the 256-byte table plus its own padded bitstream). Used where several
 // independently coded planes are concatenated (mode 11).
+//
+// Decoding uses a primary lookup table of 1 << min(maxLen, 12) entries fed by
+// an MSB-aligned 64-bit accumulator. Codes longer than the table width and
+// stream tails shorter than the table width fall back to the exact canonical
+// loop, so truncation, invalid-code, and padding behaviour are unchanged.
 func HuffmanDecodePrefix(encoded []byte, expectedLen int) ([]byte, int, error) {
 	if len(encoded) < huffmanTableBytes {
 		return nil, 0, werrors.Corruptf(
@@ -350,6 +444,15 @@ func HuffmanDecodePrefix(encoded []byte, expectedLen int) ([]byte, int, error) {
 	var firstIndex [huffmanMaxCodeBits + 1]uint32
 	var assigned [huffmanMaxCodeBits + 1]uint32
 	symbols := make([]byte, 0, used)
+	primaryBits := maxLen
+	if primaryBits > huffmanPrimaryBitsMax {
+		primaryBits = huffmanPrimaryBitsMax
+	}
+	// A fixed 4096-entry backing store with a constant index mask lets both
+	// bounds checks be elided; only the first 1<<primaryBits entries are ever
+	// written or read.
+	var table [1 << huffmanPrimaryBitsMax]huffmanFastEntry
+	const primaryMask = 1<<huffmanPrimaryBitsMax - 1
 	code := uint32(0)
 	previous := uint8(0)
 	for _, item := range order {
@@ -361,8 +464,24 @@ func HuffmanDecodePrefix(encoded []byte, expectedLen int) ([]byte, int, error) {
 		}
 		assigned[slot]++
 		symbols = append(symbols, item.symbol)
+		if slot <= primaryBits {
+			shift := uint(primaryBits - slot)
+			start := int(code) << shift
+			width := 1 << shift
+			for index := start; index < start+width; index++ {
+				table[index] = huffmanFastEntry{symbol: item.symbol, length: item.length}
+			}
+		}
 		code++
 		previous = item.length
+	}
+
+	tables := huffmanCanonicalTables{
+		counts:     counts,
+		firstCode:  firstCode,
+		firstIndex: firstIndex,
+		symbols:    symbols,
+		maxLen:     maxLen,
 	}
 
 	capacity := expectedLen
@@ -370,41 +489,57 @@ func HuffmanDecodePrefix(encoded []byte, expectedLen int) ([]byte, int, error) {
 		capacity = 1 << 20
 	}
 	out := make([]byte, 0, capacity)
-	bitPos := 0
-	currentCode := uint32(0)
-	currentLen := 0
+	streamLen := len(stream)
+	// Masking the shift amounts makes Go's compiler prove they are below 64,
+	// which removes the three-instruction shift-safety sequence per symbol.
+	primaryShift := uint(64-primaryBits) & 63
+	primaryBitsU := uint(primaryBits)
+	var acc uint64
+	var accBits uint
+	nextByte := 0
+	bitsConsumed := 0
 	for len(out) < expectedLen {
-		if currentLen > 0 {
-			slot := currentLen
-			if currentCode >= firstCode[slot] {
-				offset := currentCode - firstCode[slot]
-				if offset < counts[slot] {
-					out = append(out, symbols[int(firstIndex[slot]+offset)])
-					currentCode = 0
-					currentLen = 0
-					continue
-				}
-			}
-			if currentLen >= maxLen {
-				return nil, 0, werrors.NewCorrupt(
-					"huffman-canonical-v1 bitstream contains an invalid code")
+		// Fast path: a single table probe when enough real bits are buffered
+		// and the code is no longer than the table width.
+		if accBits < primaryBitsU {
+			for accBits <= 56 && nextByte < streamLen {
+				acc |= uint64(stream[nextByte]) << ((56 - accBits) & 63)
+				nextByte++
+				accBits += 8
 			}
 		}
-		if bitPos >= len(stream)*8 {
-			return nil, 0, werrors.Corruptf(
-				"huffman-canonical-v1 bitstream ended after %d of %d bytes",
-				len(out), expectedLen)
+		if accBits >= primaryBitsU {
+			fast := table[(acc>>primaryShift)&primaryMask]
+			if fast.length != 0 {
+				out = append(out, fast.symbol)
+				shift := uint(fast.length) & 63
+				acc <<= shift
+				accBits -= shift
+				bitsConsumed += int(fast.length)
+				continue
+			}
 		}
-		bit := (stream[bitPos/8] >> uint(7-bitPos%8)) & 1
-		currentCode = (currentCode << 1) | uint32(bit)
-		currentLen++
-		bitPos++
+
+		// Rare exact path: codes longer than the table covers and stream tails
+		// with fewer than primaryBits buffered bits. The counter is copied in and
+		// out so the hot path never has to keep it addressable.
+		reader := huffmanBitReader{stream: stream, nextByte: nextByte, acc: acc, accBits: accBits}
+		consumed := bitsConsumed
+		symbol, err := huffmanDecodeOneCanonical(&tables, &reader, &consumed, len(out), expectedLen)
+		if err != nil {
+			return nil, 0, err
+		}
+		bitsConsumed = consumed
+		nextByte = reader.nextByte
+		acc = reader.acc
+		accBits = reader.accBits
+		out = append(out, symbol)
 	}
 
 	// Padding is checked only inside the bytes this stream consumed; any
 	// further bytes belong to the caller (the next plane).
-	consumedStream := (bitPos + 7) / 8
-	usedBitsInLast := bitPos % 8
+	consumedStream := (bitsConsumed + 7) / 8
+	usedBitsInLast := bitsConsumed % 8
 	if usedBitsInLast != 0 {
 		last := stream[consumedStream-1]
 		mask := byte(1<<uint(8-usedBitsInLast)) - 1
