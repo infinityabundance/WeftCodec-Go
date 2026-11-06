@@ -125,17 +125,6 @@ func pushBits(out []byte, bitLen *uint64, value, count uint64) []byte {
 	return out
 }
 
-// takeBits reads count bits, most significant first, from plane at *pos.
-func takeBits(plane []byte, pos *uint64, count uint64) uint64 {
-	var value uint64
-	for i := uint64(0); i < count; i++ {
-		bit := (plane[*pos/8] >> uint(7-(*pos%8))) & 1
-		value = (value << 1) | uint64(bit)
-		*pos = *pos + 1
-	}
-	return value
-}
-
 // SplitFloatTensorPayload splits a little-endian float payload into the
 // huffman-canonical-v1 exponent plane and the raw sign+mantissa plane.
 func SplitFloatTensorPayload(payload []byte, dtype FloatDtype, elementCount uint64) ([]byte, []byte, error) {
@@ -223,29 +212,56 @@ func JoinFloatTensorPayload(
 	if err != nil {
 		return nil, err
 	}
-	capHint := capacity
-	if capHint > 1<<20 {
-		capHint = 1 << 20
-	}
-	out := make([]byte, 0, capHint)
+	// The output is exactly the declared decoded byte count, which was bounded
+	// by MaxDecodedBytes above, so the allocation is bounded as well.
+	out := make([]byte, capacity)
 	elementBytes := int(dtype.ElementSize())
-	var bitPos uint64
-	for _, exponentByte := range exponentPlane {
+	mantissaMask := (uint64(1) << uint(dtype.MantissaBits)) - 1
+	width := dtype.SignBits + dtype.MantissaBits
+
+	// MSB-first 64-bit accumulator holding the next accumulatedBits bits in its
+	// high positions and zeros below: refill eight bits at a time while a whole
+	// byte still fits, then read the whole sign+mantissa width in one shift and
+	// drop it by shifting left. accumulatedBits >= width always holds because
+	// the mantissa plane is exactly ceil(elementCount * width / 8) bytes and
+	// width <= 24.
+	var accumulator uint64
+	var accumulatedBits uint
+	planePos := 0
+	for index, exponentByte := range exponentPlane {
 		if uint64(exponentByte)>>uint(dtype.ExponentBits) != 0 {
 			return nil, werrors.NewCorrupt(
 				"float tensor exponent byte exceeds the dtype exponent width")
 		}
-		sign := takeBits(mantissaPlane, &bitPos, dtype.SignBits)
-		mantissa := takeBits(mantissaPlane, &bitPos, dtype.MantissaBits)
-		word := (sign << uint(dtype.ExponentBits+dtype.MantissaBits)) |
-			(uint64(exponentByte) << uint(dtype.MantissaBits)) |
-			mantissa
-		var buf [8]byte
-		binary.LittleEndian.PutUint64(buf[:], word)
-		out = append(out, buf[:elementBytes]...)
+		for accumulatedBits <= 56 && planePos < len(mantissaPlane) {
+			accumulator |= uint64(mantissaPlane[planePos]) << (56 - accumulatedBits)
+			planePos++
+			accumulatedBits += 8
+		}
+		value := accumulator >> (64 - uint(width))
+		accumulator <<= uint(width)
+		accumulatedBits -= uint(width)
+
+		sign := value >> uint(dtype.MantissaBits)
+		mantissa := value & mantissaMask
+		word := sign<<uint(dtype.ExponentBits+dtype.MantissaBits) |
+			uint64(exponentByte)<<uint(dtype.MantissaBits) | mantissa
+		start := index * elementBytes
+		switch elementBytes {
+		case 1:
+			out[start] = byte(word)
+		case 2:
+			binary.LittleEndian.PutUint16(out[start:], uint16(word))
+		case 4:
+			binary.LittleEndian.PutUint32(out[start:], uint32(word))
+		default:
+			var buf [8]byte
+			binary.LittleEndian.PutUint64(buf[:], word)
+			copy(out[start:start+elementBytes], buf[:elementBytes])
+		}
 	}
 	usedBits := uint64(len(mantissaPlane)) * 8
-	padding := usedBits - bitPos
+	padding := usedBits - mantissaBits
 	if padding > 0 {
 		last := mantissaPlane[len(mantissaPlane)-1]
 		mask := byte(1<<uint(padding)) - 1
