@@ -241,6 +241,8 @@ func DecodeBytes(ctx context.Context, frameBytes []byte, resolver dependency.Res
 		}
 	case frame.ModeTensorTiled:
 		plaintext, err = DecodeTiledTensor(f, lim)
+	case frame.ModeFloatTiled:
+		plaintext, err = DecodeFloatTiled(f, lim)
 	default:
 		err = werrors.UnsupportedModef("mode %d is not decodable", f.Header.Mode)
 	}

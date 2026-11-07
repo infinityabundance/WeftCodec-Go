@@ -180,6 +180,8 @@ func runEncode(ctx context.Context, args []string) error {
 			*blockSize, *scales, *zeroPoints, visited, *output, lim)
 	case "tensor-tiled", "tensor_tiled":
 		encoded, err = encodeTensorTiled(data, *dtype, *shape, *tileShape, lim)
+	case "float-tiled", "float_tiled":
+		encoded, err = encodeFloatTiled(data, *dtype, *shape, *tileShape, lim)
 	case "tokens":
 		encoded, err = encodeTokens(data, lim)
 	case "auto":
@@ -587,6 +589,28 @@ func encodeTensorTiled(
 		return nil, err
 	}
 	return modes.EncodeTiledTensor(payload, dtype, shape, tileShape, lim)
+}
+
+func encodeFloatTiled(
+	payload []byte, dtype, shapeText, tileShapeText string, lim limits.Limits,
+) ([]byte, error) {
+	if dtype == "" {
+		return nil, werrors.NewMalformed(
+			"FLOAT_TILED encoding requires --dtype/--shape/--tile-shape")
+	}
+	shape, err := parseShapeText(shapeText, "--shape")
+	if err != nil {
+		return nil, err
+	}
+	tileShape, err := parseShapeText(tileShapeText, "--tile-shape")
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := modes.ParseFloatDtype(dtype)
+	if err != nil {
+		return nil, err
+	}
+	return modes.EncodeFloatTiled(payload, parsed, shape, tileShape, lim)
 }
 
 func encodeWeightDelta(

@@ -48,6 +48,9 @@ const (
 	// DomainTensorTile is the independently decodable tile identity domain
 	// (WEFT-AI-CODEC §16).
 	DomainTensorTile = "weft/tensor/tile/v1"
+	// DomainFloatTile is the independently decodable float-tile identity
+	// domain (WEFT-AI-CODEC §18).
+	DomainFloatTile = "weft/tensor/float_tile/v1"
 )
 
 // Hash32 is a 32-byte Weft digest. It is comparable and ordered

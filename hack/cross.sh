@@ -86,6 +86,8 @@ make_src() {
   # 2x2x2 fp32 tensor in 1x2x2 tiles.
   head -c 32 "$CROSS/src/payload.bin" > "$CROSS/src/tensor_tiled_bf16.bin"
   head -c 32 "$CROSS/src/payload.bin" > "$CROSS/src/tensor_tiled_fp32.bin"
+  head -c 32 "$CROSS/src/payload.bin" > "$CROSS/src/float_tiled_bf16.bin"
+  head -c 32 "$CROSS/src/payload.bin" > "$CROSS/src/float_tiled_fp32.bin"
   # SPARSE_DELTA (mode 16) fixtures: bf16 with one changed word, q8_0 with
   # three separate runs, and an fp32 pair that is byte-identical (run_count 0).
   head -c 12 "$CROSS/src/payload.bin" > "$CROSS/src/sparse_base_bf16.bin"
@@ -120,7 +122,7 @@ dep_hash() {
 }
 
 frame_modes() {
-  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8 semantic_delta_bf16 semantic_delta_fp32 semantic_delta_q8 kv_cache_p0 kv_cache_p1 activation_c0 activation_c1 tensor_tiled_bf16 tensor_tiled_fp32 sparse_delta_bf16 sparse_delta_q8 sparse_delta_fp32
+  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8 semantic_delta_bf16 semantic_delta_fp32 semantic_delta_q8 kv_cache_p0 kv_cache_p1 activation_c0 activation_c1 tensor_tiled_bf16 tensor_tiled_fp32 float_tiled_bf16 float_tiled_fp32 sparse_delta_bf16 sparse_delta_q8 sparse_delta_fp32
 }
 
 original_for() {
@@ -148,6 +150,8 @@ original_for() {
     activation_c1) echo activation_chunk1.bin ;;
     tensor_tiled_bf16) echo tensor_tiled_bf16.bin ;;
     tensor_tiled_fp32) echo tensor_tiled_fp32.bin ;;
+    float_tiled_bf16) echo float_tiled_bf16.bin ;;
+    float_tiled_fp32) echo float_tiled_fp32.bin ;;
     sparse_delta_bf16) echo sparse_target_bf16.bin ;;
     sparse_delta_q8) echo sparse_target_q8.bin ;;
     sparse_delta_fp32) echo sparse_target_fp32.bin ;;
@@ -197,6 +201,8 @@ rust_gen() {
   "$RUST" encode --mode activation-stream --input "$CROSS/src/activation_chunk1.bin" --output "$CROSS/rust/activation_c1.wft1" --metadata "$CROSS/src/activation_chunk1.json"
   "$RUST" encode --mode tensor-tiled --input "$CROSS/src/tensor_tiled_bf16.bin" --output "$CROSS/rust/tensor_tiled_bf16.wft1" --dtype bf16 --shape 4,4 --tile-shape 2,2
   "$RUST" encode --mode tensor-tiled --input "$CROSS/src/tensor_tiled_fp32.bin" --output "$CROSS/rust/tensor_tiled_fp32.wft1" --dtype f32 --shape 2,2,2 --tile-shape 1,2,2
+  "$RUST" encode --mode float-tiled --input "$CROSS/src/float_tiled_bf16.bin" --output "$CROSS/rust/float_tiled_bf16.wft1" --dtype bf16 --shape 4,4 --tile-shape 2,2
+  "$RUST" encode --mode float-tiled --input "$CROSS/src/float_tiled_fp32.bin" --output "$CROSS/rust/float_tiled_fp32.wft1" --dtype fp32 --shape 2,2,2 --tile-shape 1,2,2
   "$RUST" encode --mode tensor --input "$CROSS/src/sparse_base_bf16.bin" --output "$CROSS/rust/sparse_base_bf16.wft1" --dtype bf16 --shape 2,3
   "$RUST" encode --mode sparse-delta --input "$CROSS/src/sparse_target_bf16.bin" --output "$CROSS/rust/sparse_delta_bf16.wft1" --base "$CROSS/rust/sparse_base_bf16.wft1" --dtype bf16 --shape 2,3
   "$RUST" encode --mode tensor --input "$CROSS/src/sparse_base_q8.bin" --output "$CROSS/rust/sparse_base_q8.wft1" --dtype i8 --shape 4,8
@@ -255,6 +261,8 @@ go_gen() {
   "$GO" encode --mode activation-stream --input "$CROSS/src/activation_chunk1.bin" --output "$CROSS/go/activation_c1.wft1" --metadata "$CROSS/src/activation_chunk1.json"
   "$GO" encode --mode tensor-tiled --input "$CROSS/src/tensor_tiled_bf16.bin" --output "$CROSS/go/tensor_tiled_bf16.wft1" --dtype bf16 --shape 4,4 --tile-shape 2,2
   "$GO" encode --mode tensor-tiled --input "$CROSS/src/tensor_tiled_fp32.bin" --output "$CROSS/go/tensor_tiled_fp32.wft1" --dtype f32 --shape 2,2,2 --tile-shape 1,2,2
+  "$GO" encode --mode float-tiled --input "$CROSS/src/float_tiled_bf16.bin" --output "$CROSS/go/float_tiled_bf16.wft1" --dtype bf16 --shape 4,4 --tile-shape 2,2
+  "$GO" encode --mode float-tiled --input "$CROSS/src/float_tiled_fp32.bin" --output "$CROSS/go/float_tiled_fp32.wft1" --dtype fp32 --shape 2,2,2 --tile-shape 1,2,2
   "$GO" encode --mode tensor --input "$CROSS/src/sparse_base_bf16.bin" --output "$CROSS/go/sparse_base_bf16.wft1" --dtype bf16 --shape 2,3
   "$GO" encode --mode sparse-delta --input "$CROSS/src/sparse_target_bf16.bin" --output "$CROSS/go/sparse_delta_bf16.wft1" --base "$CROSS/go/sparse_base_bf16.wft1" --dtype bf16 --shape 2,3
   "$GO" encode --mode tensor --input "$CROSS/src/sparse_base_q8.bin" --output "$CROSS/go/sparse_base_q8.wft1" --dtype i8 --shape 4,8
@@ -341,7 +349,7 @@ compare() {
   done
 
   echo "== deterministic frame bytes (Go == Rust) =="
-  for mode in raw raw_empty raw_chunked reference delta structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8 kv_cache_p0 kv_cache_p1 activation_c0 activation_c1 tensor_tiled_bf16 tensor_tiled_fp32 sparse_delta_bf16 sparse_delta_q8 sparse_delta_fp32; do
+  for mode in raw raw_empty raw_chunked reference delta structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8 kv_cache_p0 kv_cache_p1 activation_c0 activation_c1 tensor_tiled_bf16 tensor_tiled_fp32 float_tiled_bf16 float_tiled_fp32 sparse_delta_bf16 sparse_delta_q8 sparse_delta_fp32; do
     if cmp -s "$CROSS/rust/$mode.wft1" "$CROSS/go/$mode.wft1"; then
       echo "PASS identical $mode"
     else
@@ -392,6 +400,15 @@ compare() {
 
   echo "== TENSOR_TILED (mode 15) byte identity =="
   for mode in tensor_tiled_bf16 tensor_tiled_fp32; do
+    if cmp -s "$CROSS/rust/$mode.wft1" "$CROSS/go/$mode.wft1"; then
+      echo "YES byte-identical $mode"
+    else
+      echo "NO  byte-identical $mode"; failures=$((failures + 1))
+    fi
+  done
+
+  echo "== FLOAT_TILED (mode 17) byte identity =="
+  for mode in float_tiled_bf16 float_tiled_fp32; do
     if cmp -s "$CROSS/rust/$mode.wft1" "$CROSS/go/$mode.wft1"; then
       echo "YES byte-identical $mode"
     else
