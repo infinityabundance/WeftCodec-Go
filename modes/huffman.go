@@ -15,6 +15,7 @@ package modes
 // bitstream and length failures are Corrupt.
 
 import (
+	"encoding/binary"
 	"sort"
 
 	"github.com/infinityabundance/WeftCodec-Go/werrors"
@@ -346,7 +347,28 @@ func HuffmanDecode(encoded []byte, expectedLen int) ([]byte, error) {
 // an MSB-aligned 64-bit accumulator. Codes longer than the table width and
 // stream tails shorter than the table width fall back to the exact canonical
 // loop, so truncation, invalid-code, and padding behaviour are unchanged.
+// HuffmanDecodePrefix decodes one stream from the start of encoded.
+//
+// The selected kernel is the scalar one: Go has no SIMD intrinsics, and the
+// word-level variant (8-byte refill + two-symbol unroll) measured 0.93x of the
+// scalar kernel in the decode-floor court, so it is not selected by default.
 func HuffmanDecodePrefix(encoded []byte, expectedLen int) ([]byte, int, error) {
+	return huffmanDecodePrefix(encoded, expectedLen, false)
+}
+
+// HuffmanDecodePrefixWordOptimised forces the word-level kernel (an 8-byte
+// big-endian refill and a two-symbol unroll). It is retained and measured
+// because the loss is a real result, not an assumption.
+func HuffmanDecodePrefixWordOptimised(encoded []byte, expectedLen int) ([]byte, int, error) {
+	return huffmanDecodePrefix(encoded, expectedLen, true)
+}
+
+// HuffmanDecodePrefixScalar forces the scalar kernel.
+func HuffmanDecodePrefixScalar(encoded []byte, expectedLen int) ([]byte, int, error) {
+	return huffmanDecodePrefix(encoded, expectedLen, false)
+}
+
+func huffmanDecodePrefix(encoded []byte, expectedLen int, optimised bool) ([]byte, int, error) {
 	if len(encoded) < huffmanTableBytes {
 		return nil, 0, werrors.Corruptf(
 			"huffman-canonical-v1 stream is %d bytes, shorter than its %d-byte code-length table",
@@ -499,6 +521,18 @@ func HuffmanDecodePrefix(encoded []byte, expectedLen int) ([]byte, int, error) {
 	nextByte := 0
 	bitsConsumed := 0
 	for len(out) < expectedLen {
+		// Optimised refill: one big-endian 8-byte load instead of up to eight
+		// byte loads. `k` whole bytes fit in the accumulator's free space.
+		if optimised {
+			for accBits <= 56 && nextByte+8 <= streamLen {
+				word := binary.BigEndian.Uint64(stream[nextByte : nextByte+8])
+				k := (64 - accBits) / 8
+				byteBits := k * 8
+				acc |= (word >> (64 - byteBits)) << ((64 - accBits - byteBits) & 63)
+				nextByte += int(k)
+				accBits += byteBits
+			}
+		}
 		// Fast path: a single table probe when enough real bits are buffered
 		// and the code is no longer than the table width.
 		if accBits < primaryBitsU {
@@ -511,10 +545,25 @@ func HuffmanDecodePrefix(encoded []byte, expectedLen int) ([]byte, int, error) {
 		if accBits >= primaryBitsU {
 			fast := table[(acc>>primaryShift)&primaryMask]
 			if fast.length != 0 {
+				shift1 := uint(fast.length) & 63
+				afterFirst := acc << shift1
+				bitsAfterFirst := accBits - shift1
+				// Second symbol in the same iteration when both prefixes are
+				// buffered and the declared output still has room for it.
+				if optimised && len(out)+1 < expectedLen && bitsAfterFirst >= primaryBitsU {
+					second := table[(afterFirst>>primaryShift)&primaryMask]
+					if second.length != 0 {
+						shift2 := uint(second.length) & 63
+						out = append(out, fast.symbol, second.symbol)
+						acc = afterFirst << shift2
+						accBits = bitsAfterFirst - shift2
+						bitsConsumed += int(fast.length) + int(second.length)
+						continue
+					}
+				}
 				out = append(out, fast.symbol)
-				shift := uint(fast.length) & 63
-				acc <<= shift
-				accBits -= shift
+				acc = afterFirst
+				accBits = bitsAfterFirst
 				bitsConsumed += int(fast.length)
 				continue
 			}

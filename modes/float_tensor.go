@@ -216,6 +216,19 @@ func JoinFloatTensorPayload(
 	// by MaxDecodedBytes above, so the allocation is bounded as well.
 	out := make([]byte, capacity)
 	elementBytes := int(dtype.ElementSize())
+	// BF16 is the one width where the sign+mantissa plane is exactly one byte
+	// per element, so the join is a direct two-byte pack. Go has no SIMD
+	// intrinsics, so this is a word-level kernel: it avoids the 64-bit
+	// accumulator and the per-element switch below.
+	if dtype.Name == "bf16" {
+		for index := range exponentPlane {
+			exponent := exponentPlane[index]
+			plane := mantissaPlane[index]
+			out[index*2] = (plane & 0x7f) | ((exponent & 1) << 7)
+			out[index*2+1] = ((exponent >> 1) & 0x7f) | (plane & 0x80)
+		}
+		return out, nil
+	}
 	mantissaMask := (uint64(1) << uint(dtype.MantissaBits)) - 1
 	width := dtype.SignBits + dtype.MantissaBits
 
