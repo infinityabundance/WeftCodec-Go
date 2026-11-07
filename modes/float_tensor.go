@@ -128,6 +128,16 @@ func pushBits(out []byte, bitLen *uint64, value, count uint64) []byte {
 // SplitFloatTensorPayload splits a little-endian float payload into the
 // huffman-canonical-v1 exponent plane and the raw sign+mantissa plane.
 func SplitFloatTensorPayload(payload []byte, dtype FloatDtype, elementCount uint64) ([]byte, []byte, error) {
+	exponentPlane, mantissaPlane, err := splitFloatTensorPlanes(payload, dtype, elementCount)
+	if err != nil {
+		return nil, nil, err
+	}
+	return HuffmanEncode(exponentPlane), mantissaPlane, nil
+}
+
+// splitFloatTensorPlanes returns the raw exponent byte plane and the packed
+// sign+mantissa plane, without coding either plane.
+func splitFloatTensorPlanes(payload []byte, dtype FloatDtype, elementCount uint64) ([]byte, []byte, error) {
 	expectedBytes, err := limits.MulChecked(elementCount, dtype.ElementSize(),
 		"float tensor decoded byte count")
 	if err != nil {
@@ -167,8 +177,7 @@ func SplitFloatTensorPayload(payload []byte, dtype FloatDtype, elementCount uint
 		mantissaPlane = pushBits(mantissaPlane, &bitLen, sign, dtype.SignBits)
 		mantissaPlane = pushBits(mantissaPlane, &bitLen, mantissa, dtype.MantissaBits)
 	}
-	compressed := HuffmanEncode(exponentPlane)
-	return compressed, mantissaPlane, nil
+	return exponentPlane, mantissaPlane, nil
 }
 
 // JoinFloatTensorPayload reconstructs the exact little-endian element bytes

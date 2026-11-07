@@ -51,6 +51,9 @@ const (
 	// DomainFloatTile is the independently decodable float-tile identity
 	// domain (WEFT-AI-CODEC §18).
 	DomainFloatTile = "weft/tensor/float_tile/v1"
+	// DomainFloatTileStreams is the independently decodable multi-stream
+	// float-tile identity domain (WEFT-AI-CODEC §19).
+	DomainFloatTileStreams = "weft/tensor/float_tile_streams/v1"
 )
 
 // Hash32 is a 32-byte Weft digest. It is comparable and ordered

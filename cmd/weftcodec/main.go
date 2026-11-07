@@ -128,6 +128,7 @@ func runEncode(ctx context.Context, args []string) error {
 	zeroPoints := fs.String("zero-points", "", "TENSOR_SHARDED per-block zero points, comma-separated i64")
 	semanticPolicy := fs.String("semantic-policy", "", "SEMANTIC_DELTA policy: none|mantissa_truncate:N|block_quantize:B:L")
 	tileShape := fs.String("tile-shape", "", "TENSOR_TILED tile extents as comma-separated u64 values")
+	nStreams := fs.Uint64("n-streams", 0, "FLOAT_TILED_STREAMS per-tile stream count (1..=16, default 4)")
 	if err := fs.Parse(args); err != nil {
 		return werrors.NewParse(err.Error())
 	}
@@ -182,6 +183,8 @@ func runEncode(ctx context.Context, args []string) error {
 		encoded, err = encodeTensorTiled(data, *dtype, *shape, *tileShape, lim)
 	case "float-tiled", "float_tiled":
 		encoded, err = encodeFloatTiled(data, *dtype, *shape, *tileShape, lim)
+	case "float-tiled-streams", "float_tiled_streams":
+		encoded, err = encodeFloatTiledStreams(data, *dtype, *shape, *tileShape, *nStreams, lim)
 	case "tokens":
 		encoded, err = encodeTokens(data, lim)
 	case "auto":
@@ -611,6 +614,31 @@ func encodeFloatTiled(
 		return nil, err
 	}
 	return modes.EncodeFloatTiled(payload, parsed, shape, tileShape, lim)
+}
+
+func encodeFloatTiledStreams(
+	payload []byte, dtype, shapeText, tileShapeText string, nStreams uint64, lim limits.Limits,
+) ([]byte, error) {
+	if dtype == "" {
+		return nil, werrors.NewMalformed(
+			"FLOAT_TILED_STREAMS encoding requires --dtype/--shape/--tile-shape")
+	}
+	shape, err := parseShapeText(shapeText, "--shape")
+	if err != nil {
+		return nil, err
+	}
+	tileShape, err := parseShapeText(tileShapeText, "--tile-shape")
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := modes.ParseFloatDtype(dtype)
+	if err != nil {
+		return nil, err
+	}
+	if nStreams == 0 {
+		nStreams = modes.FloatTiledStreamsDefault
+	}
+	return modes.EncodeFloatTiledStreams(payload, parsed, shape, tileShape, nStreams, lim)
 }
 
 func encodeWeightDelta(
