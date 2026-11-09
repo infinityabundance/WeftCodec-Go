@@ -233,6 +233,12 @@ func DecodeBytes(ctx context.Context, frameBytes []byte, resolver dependency.Res
 		if err == nil {
 			plaintext = page.Bytes
 		}
+	case frame.ModeKvCacheProv:
+		var page DecodedKvProvPage
+		page, err = DecodeKvProvPage(f, lim)
+		if err == nil {
+			plaintext = page.Bytes
+		}
 	case frame.ModeActivationStream:
 		var chunk DecodedActivationChunk
 		chunk, err = DecodeActivationChunk(f, lim)

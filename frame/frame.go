@@ -109,6 +109,9 @@ const (
 	// ModeFloatTiledStreams is the independently decodable multi-stream
 	// float-tile mode (WEFT-AI-CODEC §19).
 	ModeFloatTiledStreams Mode = 18
+	// ModeKvCacheProv is the provenance-bound KV cache page mode
+	// (WEFT-AI-CODEC §20, WEFT-KV-PROVENANCE).
+	ModeKvCacheProv Mode = 19
 )
 
 // String returns the lowercase mode name.
@@ -152,6 +155,8 @@ func (m Mode) String() string {
 		return "float_tiled"
 	case ModeFloatTiledStreams:
 		return "float_tiled_streams"
+	case ModeKvCacheProv:
+		return "kv_cache_prov"
 	default:
 		return fmt.Sprintf("mode(%d)", uint8(m))
 	}
@@ -160,7 +165,7 @@ func (m Mode) String() string {
 // ModeFromU8 validates a wire mode value.
 func ModeFromU8(v uint8) (Mode, error) {
 	switch {
-	case v <= 18:
+	case v <= 19:
 		return Mode(v), nil
 	case v <= 127:
 		return 0, werrors.UnsupportedModef("reserved mode %d is not defined in v1", v)
@@ -210,6 +215,8 @@ func ModeFromName(name string) (Mode, error) {
 		return ModeFloatTiled, nil
 	case "float_tiled_streams", "float-tiled-streams", "float_tile_streams", "ftiled_streams", "tiled_streams":
 		return ModeFloatTiledStreams, nil
+	case "kv_prov", "kv-prov", "kv_cache_prov", "kv-cache-prov", "kcacheprov":
+		return ModeKvCacheProv, nil
 	default:
 		return 0, werrors.UnsupportedModef("unknown mode %q", name)
 	}
@@ -768,7 +775,7 @@ func validateModeRules(h Header, deps []Dependency, lim limits.Limits) error {
 		if h.ChunkCount != 0 {
 			return werrors.NewMalformed("DELTA must not be chunked")
 		}
-	case ModeTensor, ModeTokenSequence, ModeQuantizedTensor, ModeFloatTensor, ModeTensorSharded, ModeKvCache, ModeActivationStream, ModeTensorTiled, ModeFloatTiled, ModeFloatTiledStreams:
+	case ModeTensor, ModeTokenSequence, ModeQuantizedTensor, ModeFloatTensor, ModeTensorSharded, ModeKvCache, ModeActivationStream, ModeTensorTiled, ModeFloatTiled, ModeFloatTiledStreams, ModeKvCacheProv:
 		if h.Domain != DomainPayload {
 			return werrors.NewMalformed(
 				"AI-mode frames must use the payload domain")

@@ -237,6 +237,14 @@ func parseKvCacheDescriptor(bytes []byte, lim limits.Limits) (KvCacheMeta, error
 	if err != nil {
 		return KvCacheMeta{}, err
 	}
+	return ParseKvCacheDescriptorValue(value, lim)
+}
+
+// ParseKvCacheDescriptorValue validates a mode-12 page descriptor from an
+// already-decoded WCB value. It is the exact frozen mode-12 descriptor
+// validation, exposed so the additive mode 19 KV_CACHE_PROV descriptor can
+// embed the same page map and validate it with one implementation.
+func ParseKvCacheDescriptorValue(value wcb.Value, lim limits.Limits) (KvCacheMeta, error) {
 	if value.Kind != wcb.Map {
 		return KvCacheMeta{}, werrors.NewMalformed("KV_CACHE metadata must be a WCB map")
 	}
@@ -367,7 +375,9 @@ func buildKvPlanes(dtype KvDtype, bytes []byte, elementCount int) [][]byte {
 	return planes
 }
 
-func decodeKvPlanes(dtype KvDtype, payload []byte, pageBytes uint64) ([]byte, error) {
+// DecodeKvPlanes decodes the mode-12 byte-plane payload verbatim. Exposed for
+// mode 19 KV_CACHE_PROV, which reuses the mode-12 payload unchanged.
+func DecodeKvPlanes(dtype KvDtype, payload []byte, pageBytes uint64) ([]byte, error) {
 	if pageBytes%dtype.WordBytes != 0 {
 		return nil, werrors.NewMalformed(
 			"KV_CACHE page byte length is not a whole number of elements")
@@ -519,7 +529,7 @@ func DecodeKvPage(f *frame.Frame, lim limits.Limits) (DecodedKvPage, error) {
 			"KV_CACHE payload is %d bytes but payload_len declares %d",
 			len(payload), meta.PayloadLen)
 	}
-	bytes, err := decodeKvPlanes(meta.Dtype, payload, pageBytes)
+	bytes, err := DecodeKvPlanes(meta.Dtype, payload, pageBytes)
 	if err != nil {
 		return DecodedKvPage{}, err
 	}

@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -111,7 +112,7 @@ func runEncode(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("encode", flag.ContinueOnError)
 	input := fs.String("input", "", "input path or - for stdin")
 	output := fs.String("output", "", "output path or - for stdout")
-	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|tensor-tiled|weight-delta|sparse-delta|kv-cache|activation-stream|auto")
+	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|tensor-tiled|weight-delta|sparse-delta|kv-cache|kv-prov|activation-stream|auto")
 	basePath := fs.String("base", "", "base bytes for reference/delta/auto")
 	dictPath := fs.String("dict", "", "raw-content zstd dictionary for dictionary/auto")
 	level := fs.Int("level", 3, "zstd level")
@@ -119,6 +120,7 @@ func runEncode(ctx context.Context, args []string) error {
 	dtype := fs.String("dtype", "", "TENSOR dtype (f16|bf16|f32|f64|i8|u8|i16|i32|i64)")
 	shape := fs.String("shape", "", "TENSOR shape as comma-separated u64 extents")
 	metadata := fs.String("metadata", "", "TENSOR metadata JSON file")
+	provenance := fs.String("provenance", "", "KV_CACHE_PROV provenance JSON file")
 	scale := fs.Float64("scale", 0, "QUANTIZED_TENSOR affine scale (finite, > 0)")
 	zeroPoint := fs.Int64("zero-point", 0, "QUANTIZED_TENSOR zero point")
 	axis := fs.Uint("axis", 0, "TENSOR_SHARDED shard axis")
@@ -174,6 +176,8 @@ func runEncode(ctx context.Context, args []string) error {
 		encoded, err = encodeSemanticDelta(ctx, data, *dtype, *shape, base, *semanticPolicy, lim)
 	case "kv-cache", "kv_cache":
 		encoded, err = encodeKvCache(data, *metadata, lim)
+	case "kv-prov", "kv_prov":
+		encoded, err = encodeKvProv(data, *metadata, *provenance, lim)
 	case "activation-stream", "activation_stream":
 		encoded, err = encodeActivationStream(data, *metadata, lim)
 	case "tensor-sharded", "tensor_sharded":
@@ -267,6 +271,206 @@ func encodeKvCache(data []byte, metadataPath string, lim limits.Limits) ([]byte,
 		SeqStart: input.SeqStart, SeqEnd: input.SeqEnd, Dtype: dtype,
 		HeadCount: input.HeadCount, HeadDim: input.HeadDim,
 	}, data, lim)
+}
+
+type kvProvAttentionInput struct {
+	HeadCount     uint32 `json:"head_count"`
+	HeadDim       uint32 `json:"head_dim"`
+	SlidingWindow uint64 `json:"sliding_window"`
+	RopeThetaBits uint64 `json:"rope_theta_bits"`
+	RopeScaleBits uint64 `json:"rope_scale_bits"`
+}
+
+type kvProvLayoutInput struct {
+	Dtype      string `json:"dtype"`
+	PageRows   uint64 `json:"page_rows"`
+	LayerCount uint64 `json:"layer_count"`
+}
+
+type kvProvExtensionInput struct {
+	Name  string          `json:"name"`
+	Value json.RawMessage `json:"value"`
+}
+
+type kvProvDocument struct {
+	ModelRoot      string   `json:"model_root"`
+	AdapterRoots   []string `json:"adapter_roots"`
+	AdapterSetRoot *string  `json:"adapter_set_root"`
+	Tokenizer      struct {
+		Scheme    string `json:"scheme"`
+		VocabSize uint64 `json:"vocab_size"`
+	} `json:"tokenizer"`
+	TokenizerRoot *string                `json:"tokenizer_root"`
+	Attention     kvProvAttentionInput   `json:"attention"`
+	Positional    string                 `json:"positional"`
+	Layout        kvProvLayoutInput      `json:"layout"`
+	Salt          string                 `json:"salt"`
+	Extensions    []kvProvExtensionInput `json:"extensions"`
+}
+
+func jsonToWCB(raw json.RawMessage) (wcb.Value, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return wcb.Value{}, werrors.Malformedf("provenance extension value is not JSON: %v", err)
+	}
+	return jsonValueToWCB(value)
+}
+
+func jsonValueToWCB(value any) (wcb.Value, error) {
+	switch v := value.(type) {
+	case nil:
+		return wcb.NullValue(), nil
+	case bool:
+		return wcb.BoolValue(v), nil
+	case string:
+		return wcb.TextValue(v), nil
+	case json.Number:
+		if unsigned, err := strconv.ParseUint(v.String(), 10, 64); err == nil {
+			return wcb.U64Value(unsigned), nil
+		}
+		if signed, err := strconv.ParseInt(v.String(), 10, 64); err == nil {
+			return wcb.I64Value(signed), nil
+		}
+		return wcb.Value{}, werrors.NewMalformed(
+			"provenance extension numbers must be exact integers (WCB has no float)")
+	case []any:
+		items := make([]wcb.Value, 0, len(v))
+		for _, item := range v {
+			converted, err := jsonValueToWCB(item)
+			if err != nil {
+				return wcb.Value{}, err
+			}
+			items = append(items, converted)
+		}
+		return wcb.ArrayValue(items), nil
+	case map[string]any:
+		out := make(map[string]wcb.Value, len(v))
+		for key, item := range v {
+			converted, err := jsonValueToWCB(item)
+			if err != nil {
+				return wcb.Value{}, err
+			}
+			out[key] = converted
+		}
+		return wcb.MapValue(out), nil
+	default:
+		return wcb.Value{}, werrors.NewMalformed(
+			"provenance extension value has no WCB representation")
+	}
+}
+
+func encodeKvProv(data []byte, metadataPath, provenancePath string, lim limits.Limits) ([]byte, error) {
+	if metadataPath == "" {
+		return nil, werrors.NewMalformed("KV_CACHE_PROV encoding requires --metadata FILE")
+	}
+	if provenancePath == "" {
+		return nil, werrors.NewMalformed("KV_CACHE_PROV encoding requires --provenance FILE")
+	}
+	rawMeta, err := readLimited(metadataPath, lim.MaxStringBytes)
+	if err != nil {
+		return nil, err
+	}
+	var meta kvCacheMetaInput
+	if err := json.Unmarshal(rawMeta, &meta); err != nil {
+		return nil, werrors.Malformedf("KV_CACHE metadata is not valid JSON: %v", err)
+	}
+	dtype, err := modes.ParseKvDtype(meta.Dtype)
+	if err != nil {
+		return nil, err
+	}
+	rawProv, err := readLimited(provenancePath, lim.MaxStringBytes)
+	if err != nil {
+		return nil, err
+	}
+	var doc kvProvDocument
+	if err := json.Unmarshal(rawProv, &doc); err != nil {
+		return nil, werrors.Malformedf("KV_CACHE_PROV provenance is not valid JSON: %v", err)
+	}
+	modelRoot, err := hash.FromHex(doc.ModelRoot)
+	if err != nil {
+		return nil, err
+	}
+	adapters := make([]hash.Hash32, 0, len(doc.AdapterRoots))
+	for _, text := range doc.AdapterRoots {
+		root, err := hash.FromHex(text)
+		if err != nil {
+			return nil, err
+		}
+		adapters = append(adapters, root)
+	}
+	salt, err := hash.FromHex(doc.Salt)
+	if err != nil {
+		return nil, err
+	}
+	positional, err := modes.ParseKvPositional(doc.Positional)
+	if err != nil {
+		return nil, err
+	}
+	layoutDtype, err := modes.ParseKvDtype(doc.Layout.Dtype)
+	if err != nil {
+		return nil, err
+	}
+	extensions := make([]modes.KvExtension, 0, len(doc.Extensions))
+	for _, item := range doc.Extensions {
+		value, err := jsonToWCB(item.Value)
+		if err != nil {
+			return nil, err
+		}
+		extensions = append(extensions, modes.KvExtension{Name: item.Name, Value: value})
+	}
+	input := modes.KvProvenanceInput{
+		ModelRoot:          modelRoot,
+		AdapterRoots:       adapters,
+		TokenizerScheme:    doc.Tokenizer.Scheme,
+		TokenizerVocabSize: doc.Tokenizer.VocabSize,
+		Attention: modes.KvAttention{
+			HeadCount:     doc.Attention.HeadCount,
+			HeadDim:       doc.Attention.HeadDim,
+			SlidingWindow: doc.Attention.SlidingWindow,
+			RopeThetaBits: doc.Attention.RopeThetaBits,
+			RopeScaleBits: doc.Attention.RopeScaleBits,
+		},
+		Positional: positional,
+		Layout: modes.KvLayout{
+			Dtype:      layoutDtype,
+			PageRows:   doc.Layout.PageRows,
+			LayerCount: doc.Layout.LayerCount,
+		},
+		Salt:       salt,
+		Extensions: extensions,
+	}
+	canonical, err := input.Canonicalize()
+	if err != nil {
+		return nil, err
+	}
+	if doc.AdapterSetRoot != nil {
+		declared, err := hash.FromHex(*doc.AdapterSetRoot)
+		if err != nil {
+			return nil, err
+		}
+		if declared != canonical.AdapterSetRoot {
+			return nil, werrors.NewMalformed(
+				"provenance declared adapter_set_root disagrees with adapter_roots")
+		}
+	}
+	if doc.TokenizerRoot != nil {
+		declared, err := hash.FromHex(*doc.TokenizerRoot)
+		if err != nil {
+			return nil, err
+		}
+		if declared != canonical.TokenizerRoot {
+			return nil, werrors.NewMalformed(
+				"provenance declared tokenizer_root disagrees with the tokenizer descriptor")
+		}
+	}
+	return modes.EncodeKvProvPage(modes.KvCacheInput{
+		Model: meta.Model, Layer: meta.Layer, Session: meta.Session,
+		PageIndex: meta.PageIndex, PageCount: meta.PageCount,
+		SeqStart: meta.SeqStart, SeqEnd: meta.SeqEnd, Dtype: dtype,
+		HeadCount: meta.HeadCount, HeadDim: meta.HeadDim,
+	}, data, input, lim)
 }
 
 func encodeActivationStream(data []byte, metadataPath string, lim limits.Limits) ([]byte, error) {
@@ -1139,6 +1343,35 @@ func runInspect(args []string) error {
 			output["page_bytes"] = meta.PageBytes
 			output["plane_codec"] = meta.PlaneCodec
 			output["payload_len"] = meta.PayloadLen
+		}
+		if h.Mode == frame.ModeKvCacheProv {
+			meta, err := modes.KvProvMetadata(f, lim)
+			if err != nil {
+				return err
+			}
+			root, err := meta.Root(lim)
+			if err != nil {
+				return err
+			}
+			output["provenance_root"] = root.Hex()
+			output["model"] = meta.Page.Model
+			output["layer"] = meta.Page.Layer
+			output["session"] = meta.Page.Session
+			output["page_index"] = meta.Page.PageIndex
+			output["page_count"] = meta.Page.PageCount
+			output["seq_start"] = meta.Page.SeqStart
+			output["seq_end"] = meta.Page.SeqEnd
+			output["dtype"] = meta.Page.Dtype.Name
+			output["head_count"] = meta.Page.HeadCount
+			output["head_dim"] = meta.Page.HeadDim
+			output["shape"] = meta.Page.Shape
+			output["page_bytes"] = meta.Page.PageBytes
+			output["plane_codec"] = meta.Page.PlaneCodec
+			output["payload_len"] = meta.Page.PayloadLen
+			output["positional"] = string(meta.Provenance.Positional)
+			output["adapter_set_root"] = meta.Provenance.AdapterSetRoot.Hex()
+			output["tokenizer_root"] = meta.Provenance.TokenizerRoot.Hex()
+			output["salt"] = meta.Provenance.Salt.Hex()
 		}
 		if h.Mode == frame.ModeActivationStream {
 			meta, err := modes.ActivationChunkMetadata(f, lim)
