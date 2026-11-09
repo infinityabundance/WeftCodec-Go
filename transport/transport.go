@@ -631,9 +631,91 @@ func prefixHeader(b []byte, lim limits.Limits) (frame.Header, error) {
 	if reserved0 != 0 || reserved1 != 0 || reserved2 != 0 {
 		return frame.Header{}, werrors.NewMalformed("reserved header fields must be zero")
 	}
-	if err := limits.CheckLen(
-		binary.LittleEndian.Uint64(b[12:20]), lim.MaxDecodedBytes, "decoded data"); err != nil {
+	domain := b[6]
+	if domain > frame.DomainStructured {
+		return frame.Header{}, werrors.Malformedf("invalid domain value %d", domain)
+	}
+	flags := binary.LittleEndian.Uint16(b[8:10])
+	const knownFlags = frame.FlagChunked | frame.FlagSelfContained | frame.FlagDictRaw |
+		frame.FlagOriginalHash
+	if flags&^uint16(knownFlags) != 0 {
+		return frame.Header{}, werrors.UnsupportedFeaturef(
+			"unknown critical flag bits 0x%04x", flags&^uint16(0x000f))
+	}
+	if flags&frame.FlagOriginalHash != 0 {
+		return frame.Header{}, werrors.NewUnsupportedFeature("ORIGINAL_HASH flag is reserved in v1")
+	}
+	if flags&frame.FlagSelfContained != 0 {
+		return frame.Header{}, werrors.NewUnsupportedFeature(
+			"SELF_CONTAINED is reserved and not produced in v1")
+	}
+	features := binary.LittleEndian.Uint16(b[36:38])
+	const knownFeatures = frame.FeatureDependencies | frame.FeatureChunkHashes
+	if features&^uint16(knownFeatures) != 0 {
+		return frame.Header{}, werrors.UnsupportedFeaturef(
+			"unknown critical feature bits 0x%04x", features&^uint16(0x0003))
+	}
+	decodedLen := binary.LittleEndian.Uint64(b[12:20])
+	depCount := binary.LittleEndian.Uint32(b[28:32])
+	chunkCount := binary.LittleEndian.Uint32(b[32:36])
+	if err := limits.CheckLen(decodedLen, lim.MaxDecodedBytes, "decoded data"); err != nil {
 		return frame.Header{}, err
+	}
+	if err := limits.CheckLen(
+		uint64(depCount), lim.MaxDependencyCount, "dependency count"); err != nil {
+		return frame.Header{}, err
+	}
+	if err := limits.CheckLen(uint64(chunkCount), lim.MaxChunks, "chunk count"); err != nil {
+		return frame.Header{}, err
+	}
+	depTable, err := limits.MulChecked(uint64(depCount), frame.DepEntryLen, "dependency table")
+	if err != nil {
+		return frame.Header{}, werrors.NewMalformed(err.Error())
+	}
+	chunkTable, err := limits.MulChecked(uint64(chunkCount), frame.ChunkEntryLen, "chunk table")
+	if err != nil {
+		return frame.Header{}, werrors.NewMalformed(err.Error())
+	}
+	expectedTable, err := limits.AddChecked(depTable, chunkTable, "frame table")
+	if err != nil {
+		return frame.Header{}, werrors.NewMalformed(err.Error())
+	}
+	tableLen := binary.LittleEndian.Uint64(b[76:84])
+	if tableLen != expectedTable {
+		return frame.Header{}, werrors.Malformedf(
+			"table_len %d does not match %d dependencies and %d chunks",
+			tableLen, depCount, chunkCount)
+	}
+	total, err := limits.AddChecked(frame.HeaderLen, tableLen, "frame prefix")
+	if err != nil {
+		return frame.Header{}, werrors.NewMalformed(err.Error())
+	}
+	if total > uint64(len(b)) {
+		return frame.Header{}, werrors.Malformedf(
+			"frame prefix is %d bytes, shorter than its %d-byte header and table", len(b), total)
+	}
+	chunked := flags&frame.FlagChunked != 0
+	if chunked {
+		if chunkCount == 0 {
+			return frame.Header{}, werrors.NewMalformed("CHUNKED set with an empty chunk table")
+		}
+		if features&frame.FeatureChunkHashes == 0 {
+			return frame.Header{}, werrors.NewMalformed(
+				"CHUNKED set without the CHUNK_HASHES feature")
+		}
+	} else {
+		if chunkCount != 0 {
+			return frame.Header{}, werrors.NewMalformed(
+				"chunk table present without the CHUNKED flag")
+		}
+		if features&frame.FeatureChunkHashes != 0 {
+			return frame.Header{}, werrors.NewMalformed(
+				"CHUNK_HASHES set without the CHUNKED flag")
+		}
+	}
+	if depCount > 0 && features&frame.FeatureDependencies == 0 {
+		return frame.Header{}, werrors.NewMalformed(
+			"dependency table present without the DEPENDENCIES feature")
 	}
 	return frame.Header{
 		FormatMajor: b[4],
