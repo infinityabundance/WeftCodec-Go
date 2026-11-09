@@ -54,6 +54,13 @@ const (
 	// DomainFloatTileStreams is the independently decodable multi-stream
 	// float-tile identity domain (WEFT-AI-CODEC §19).
 	DomainFloatTileStreams = "weft/tensor/float_tile_streams/v1"
+	// DomainEngram is the engram-shard descriptor identity domain
+	// (WEFT-AI-CODEC §21, WEFT-ENGRAM §5).
+	DomainEngram = "weft/engram/v1"
+	// DomainEngramGroup is the engram row-group identity domain.
+	DomainEngramGroup = "weft/engram/group/v1"
+	// DomainEngramPayload is the engram stored-payload identity domain.
+	DomainEngramPayload = "weft/engram/payload/v1"
 )
 
 // Hash32 is a 32-byte Weft digest. It is comparable and ordered

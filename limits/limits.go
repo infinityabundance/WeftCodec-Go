@@ -35,61 +35,65 @@ const (
 	DefaultMaxCausalEntries     uint64 = 4_096
 	DefaultMaxCapabilityEntries uint64 = 4_096
 	DefaultMaxURIBytes          uint64 = 64 << 10
+	// DefaultMaxEngramGroupElements bounds one engram row group.
+	DefaultMaxEngramGroupElements uint64 = 1 << 26
 )
 
 // Limits is a value type so it can be passed and copied cheaply.
 type Limits struct {
-	MaxFrameBytes        uint64
-	MaxDecodedBytes      uint64
-	MaxDependencyDepth   uint64
-	MaxDependencyCount   uint64
-	MaxTotalFetchedBytes uint64
-	MaxChunks            uint64
-	MaxDictionaryBytes   uint64
-	MaxStructuredDepth   uint64
-	MaxStructuredItems   uint64
-	MaxStringBytes       uint64
-	MaxDeltaOps          uint64
-	MaxTensorElements    uint64
-	MaxTensorRank        uint64
-	MaxTokens            uint64
-	MaxSparseRuns        uint64
-	MaxSelectorBytes     uint64
-	MaxSelectorDepth     uint64
-	MaxFieldSegments     uint64
-	MaxSelectorOperands  uint64
-	MaxArchiveEntries    uint64
-	MaxCausalEntries     uint64
-	MaxCapabilityEntries uint64
-	MaxURIBytes          uint64
+	MaxFrameBytes          uint64
+	MaxDecodedBytes        uint64
+	MaxDependencyDepth     uint64
+	MaxDependencyCount     uint64
+	MaxTotalFetchedBytes   uint64
+	MaxChunks              uint64
+	MaxDictionaryBytes     uint64
+	MaxStructuredDepth     uint64
+	MaxStructuredItems     uint64
+	MaxStringBytes         uint64
+	MaxDeltaOps            uint64
+	MaxTensorElements      uint64
+	MaxTensorRank          uint64
+	MaxTokens              uint64
+	MaxSparseRuns          uint64
+	MaxSelectorBytes       uint64
+	MaxSelectorDepth       uint64
+	MaxFieldSegments       uint64
+	MaxSelectorOperands    uint64
+	MaxArchiveEntries      uint64
+	MaxCausalEntries       uint64
+	MaxCapabilityEntries   uint64
+	MaxURIBytes            uint64
+	MaxEngramGroupElements uint64
 }
 
 // Default returns the normative v1 defaults.
 func Default() Limits {
 	return Limits{
-		MaxFrameBytes:        DefaultMaxFrameBytes,
-		MaxDecodedBytes:      DefaultMaxDecodedBytes,
-		MaxDependencyDepth:   DefaultMaxDependencyDepth,
-		MaxDependencyCount:   DefaultMaxDependencyCount,
-		MaxTotalFetchedBytes: DefaultMaxTotalFetchedBytes,
-		MaxChunks:            DefaultMaxChunks,
-		MaxDictionaryBytes:   DefaultMaxDictionaryBytes,
-		MaxStructuredDepth:   DefaultMaxStructuredDepth,
-		MaxStructuredItems:   DefaultMaxStructuredItems,
-		MaxStringBytes:       DefaultMaxStringBytes,
-		MaxDeltaOps:          DefaultMaxDeltaOps,
-		MaxTensorElements:    DefaultMaxTensorElements,
-		MaxTensorRank:        DefaultMaxTensorRank,
-		MaxTokens:            DefaultMaxTokens,
-		MaxSparseRuns:        DefaultMaxSparseRuns,
-		MaxSelectorBytes:     DefaultMaxSelectorBytes,
-		MaxSelectorDepth:     DefaultMaxSelectorDepth,
-		MaxFieldSegments:     DefaultMaxFieldSegments,
-		MaxSelectorOperands:  DefaultMaxSelectorOperands,
-		MaxArchiveEntries:    DefaultMaxArchiveEntries,
-		MaxCausalEntries:     DefaultMaxCausalEntries,
-		MaxCapabilityEntries: DefaultMaxCapabilityEntries,
-		MaxURIBytes:          DefaultMaxURIBytes,
+		MaxFrameBytes:          DefaultMaxFrameBytes,
+		MaxDecodedBytes:        DefaultMaxDecodedBytes,
+		MaxDependencyDepth:     DefaultMaxDependencyDepth,
+		MaxDependencyCount:     DefaultMaxDependencyCount,
+		MaxTotalFetchedBytes:   DefaultMaxTotalFetchedBytes,
+		MaxChunks:              DefaultMaxChunks,
+		MaxDictionaryBytes:     DefaultMaxDictionaryBytes,
+		MaxStructuredDepth:     DefaultMaxStructuredDepth,
+		MaxStructuredItems:     DefaultMaxStructuredItems,
+		MaxStringBytes:         DefaultMaxStringBytes,
+		MaxDeltaOps:            DefaultMaxDeltaOps,
+		MaxTensorElements:      DefaultMaxTensorElements,
+		MaxTensorRank:          DefaultMaxTensorRank,
+		MaxTokens:              DefaultMaxTokens,
+		MaxSparseRuns:          DefaultMaxSparseRuns,
+		MaxSelectorBytes:       DefaultMaxSelectorBytes,
+		MaxSelectorDepth:       DefaultMaxSelectorDepth,
+		MaxFieldSegments:       DefaultMaxFieldSegments,
+		MaxSelectorOperands:    DefaultMaxSelectorOperands,
+		MaxArchiveEntries:      DefaultMaxArchiveEntries,
+		MaxCausalEntries:       DefaultMaxCausalEntries,
+		MaxCapabilityEntries:   DefaultMaxCapabilityEntries,
+		MaxURIBytes:            DefaultMaxURIBytes,
+		MaxEngramGroupElements: DefaultMaxEngramGroupElements,
 	}
 }
 

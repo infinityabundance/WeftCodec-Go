@@ -103,6 +103,10 @@ make_src() {
   printf '\x01\x02\x03' | dd of="$CROSS/src/sparse_target_q8.bin" bs=1 seek=1 conv=notrunc status=none
   head -c 16 "$CROSS/src/payload.bin" > "$CROSS/src/sparse_base_fp32.bin"
   cp "$CROSS/src/sparse_base_fp32.bin" "$CROSS/src/sparse_target_fp32.bin"
+  # ENGRAM_SHARD (mode 20) fixtures: 8x2 bf16 with edges [0,3,8] and 4x3 f32
+  # with edges [0,1,4].
+  head -c 32 "$CROSS/src/payload.bin" > "$CROSS/src/engram_bf16.bin"
+  head -c 48 "$CROSS/src/payload.bin" > "$CROSS/src/engram_fp32.bin"
 }
 
 sharded_words() {
@@ -127,7 +131,7 @@ dep_hash() {
 }
 
 frame_modes() {
-  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8 semantic_delta_bf16 semantic_delta_fp32 semantic_delta_q8 kv_cache_p0 kv_cache_p1 kv_prov_p0 activation_c0 activation_c1 tensor_tiled_bf16 tensor_tiled_fp32 float_tiled_bf16 float_tiled_fp32 sparse_delta_bf16 sparse_delta_q8 sparse_delta_fp32
+  printf '%s\n' raw raw_empty raw_chunked zstd reference delta dictionary structured tensor tokens quantized float_tensor float_tensor_single float_tensor_uniform weight_delta_bf16 weight_delta_fp32 weight_delta_q8 semantic_delta_bf16 semantic_delta_fp32 semantic_delta_q8 kv_cache_p0 kv_cache_p1 kv_prov_p0 activation_c0 activation_c1 tensor_tiled_bf16 tensor_tiled_fp32 float_tiled_bf16 float_tiled_fp32 sparse_delta_bf16 sparse_delta_q8 sparse_delta_fp32 engram_bf16 engram_fp32
 }
 
 original_for() {
@@ -161,6 +165,8 @@ original_for() {
     sparse_delta_bf16) echo sparse_target_bf16.bin ;;
     sparse_delta_q8) echo sparse_target_q8.bin ;;
     sparse_delta_fp32) echo sparse_target_fp32.bin ;;
+    engram_bf16) echo engram_bf16.bin ;;
+    engram_fp32) echo engram_fp32.bin ;;
     tokens) echo tokens_payload.bin ;;
     *) echo "unknown mode $1" >&2; return 1 ;;
   esac
@@ -216,6 +222,8 @@ rust_gen() {
   "$RUST" encode --mode sparse-delta --input "$CROSS/src/sparse_target_q8.bin" --output "$CROSS/rust/sparse_delta_q8.wft1" --base "$CROSS/rust/sparse_base_q8.wft1" --dtype q8_0 --shape 4,8
   "$RUST" encode --mode tensor --input "$CROSS/src/sparse_base_fp32.bin" --output "$CROSS/rust/sparse_base_fp32.wft1" --dtype f32 --shape 2,2
   "$RUST" encode --mode sparse-delta --input "$CROSS/src/sparse_target_fp32.bin" --output "$CROSS/rust/sparse_delta_fp32.wft1" --base "$CROSS/rust/sparse_base_fp32.wft1" --dtype fp32 --shape 2,2
+  "$RUST" encode --mode engram-shard --input "$CROSS/src/engram_bf16.bin" --output "$CROSS/rust/engram_bf16.wft1" --dtype bf16 --shape 8,2 --group-edges 0,3,8 --hash-function ngram-blake3-v1 --vocab-size 8
+  "$RUST" encode --mode engram-shard --input "$CROSS/src/engram_fp32.bin" --output "$CROSS/rust/engram_fp32.wft1" --dtype f32 --shape 4,3 --group-edges 0,1,4 --hash-function ngram-sha256-v1 --vocab-size 4
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/reference.wft1" "$RUST")"
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/delta.wft1" "$RUST")"
   cp "$CROSS/src/dict.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/dictionary.wft1" "$RUST")"
@@ -277,6 +285,8 @@ go_gen() {
   "$GO" encode --mode sparse-delta --input "$CROSS/src/sparse_target_q8.bin" --output "$CROSS/go/sparse_delta_q8.wft1" --base "$CROSS/go/sparse_base_q8.wft1" --dtype q8_0 --shape 4,8
   "$GO" encode --mode tensor --input "$CROSS/src/sparse_base_fp32.bin" --output "$CROSS/go/sparse_base_fp32.wft1" --dtype f32 --shape 2,2
   "$GO" encode --mode sparse-delta --input "$CROSS/src/sparse_target_fp32.bin" --output "$CROSS/go/sparse_delta_fp32.wft1" --base "$CROSS/go/sparse_base_fp32.wft1" --dtype fp32 --shape 2,2
+  "$GO" encode --mode engram-shard --input "$CROSS/src/engram_bf16.bin" --output "$CROSS/go/engram_bf16.wft1" --dtype bf16 --shape 8,2 --group-edges 0,3,8 --hash-function ngram-blake3-v1 --vocab-size 8
+  "$GO" encode --mode engram-shard --input "$CROSS/src/engram_fp32.bin" --output "$CROSS/go/engram_fp32.wft1" --dtype f32 --shape 4,3 --group-edges 0,1,4 --hash-function ngram-sha256-v1 --vocab-size 4
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/reference.wft1" "$GO")"
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/delta.wft1" "$GO")"
   cp "$CROSS/src/dict.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/dictionary.wft1" "$GO")"
@@ -435,6 +445,15 @@ compare() {
 
   echo "== SPARSE_DELTA (mode 16) byte identity =="
   for mode in sparse_delta_bf16 sparse_delta_q8 sparse_delta_fp32; do
+    if cmp -s "$CROSS/rust/$mode.wft1" "$CROSS/go/$mode.wft1"; then
+      echo "YES byte-identical $mode"
+    else
+      echo "NO  byte-identical $mode"; failures=$((failures + 1))
+    fi
+  done
+
+  echo "== ENGRAM_SHARD (mode 20) byte identity =="
+  for mode in engram_bf16 engram_fp32; do
     if cmp -s "$CROSS/rust/$mode.wft1" "$CROSS/go/$mode.wft1"; then
       echo "YES byte-identical $mode"
     else

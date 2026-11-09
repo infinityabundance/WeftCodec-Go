@@ -251,6 +251,8 @@ func DecodeBytes(ctx context.Context, frameBytes []byte, resolver dependency.Res
 		plaintext, err = DecodeFloatTiled(f, lim)
 	case frame.ModeFloatTiledStreams:
 		plaintext, err = DecodeFloatTiledStreams(f, lim, 1)
+	case frame.ModeEngramShard:
+		plaintext, err = DecodeEngramFrame(ctx, f, resolver, lim)
 	default:
 		err = werrors.UnsupportedModef("mode %d is not decodable", f.Header.Mode)
 	}

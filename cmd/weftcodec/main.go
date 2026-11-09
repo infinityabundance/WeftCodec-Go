@@ -112,7 +112,7 @@ func runEncode(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("encode", flag.ContinueOnError)
 	input := fs.String("input", "", "input path or - for stdin")
 	output := fs.String("output", "", "output path or - for stdout")
-	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|tensor-tiled|weight-delta|sparse-delta|kv-cache|kv-prov|activation-stream|auto")
+	modeName := fs.String("mode", "auto", "raw|zstd|reference|delta|dictionary|structured|tensor|tokens|quantized|float-tensor|tensor-sharded|tensor-tiled|weight-delta|sparse-delta|kv-cache|kv-prov|activation-stream|engram-shard|auto")
 	basePath := fs.String("base", "", "base bytes for reference/delta/auto")
 	dictPath := fs.String("dict", "", "raw-content zstd dictionary for dictionary/auto")
 	level := fs.Int("level", 3, "zstd level")
@@ -131,6 +131,11 @@ func runEncode(ctx context.Context, args []string) error {
 	semanticPolicy := fs.String("semantic-policy", "", "SEMANTIC_DELTA policy: none|mantissa_truncate:N|block_quantize:B:L")
 	tileShape := fs.String("tile-shape", "", "TENSOR_TILED tile extents as comma-separated u64 values")
 	nStreams := fs.Uint64("n-streams", 0, "FLOAT_TILED_STREAMS per-tile stream count (1..=16, default 4)")
+	groupEdges := fs.String("group-edges", "", "ENGRAM_SHARD row-group edges as comma-separated u64 values")
+	hashFunction := fs.String("hash-function", modes.EngramHashBLAKE3, "ENGRAM_SHARD key-hash registry id")
+	vocabSize := fs.Uint64("vocab-size", 0, "ENGRAM_SHARD vocabulary size (default = rows)")
+	precision := fs.String("precision", "", "ENGRAM_SHARD storage dtype (default = --dtype)")
+	quantization := fs.String("quantization", "", "ENGRAM_SHARD quantization scheme (only none is implemented)")
 	if err := fs.Parse(args); err != nil {
 		return werrors.NewParse(err.Error())
 	}
@@ -189,6 +194,8 @@ func runEncode(ctx context.Context, args []string) error {
 		encoded, err = encodeFloatTiled(data, *dtype, *shape, *tileShape, lim)
 	case "float-tiled-streams", "float_tiled_streams":
 		encoded, err = encodeFloatTiledStreams(data, *dtype, *shape, *tileShape, *nStreams, lim)
+	case "engram-shard", "engram_shard":
+		encoded, err = encodeEngram(data, *dtype, *shape, *groupEdges, *hashFunction, *vocabSize, *precision, *quantization, lim)
 	case "tokens":
 		encoded, err = encodeTokens(data, lim)
 	case "auto":
@@ -796,6 +803,36 @@ func encodeTensorTiled(
 		return nil, err
 	}
 	return modes.EncodeTiledTensor(payload, dtype, shape, tileShape, lim)
+}
+
+func encodeEngram(
+	payload []byte, dtype, shapeText, groupEdgesText, hashFunction string,
+	vocabSize uint64, precision, quantization string, lim limits.Limits,
+) ([]byte, error) {
+	if dtype == "" || groupEdgesText == "" {
+		return nil, werrors.NewMalformed(
+			"ENGRAM_SHARD encoding requires --dtype/--shape/--group-edges")
+	}
+	shape, err := parseShapeText(shapeText, "--shape")
+	if err != nil {
+		return nil, err
+	}
+	edges, err := parseShapeText(groupEdgesText, "--group-edges")
+	if err != nil {
+		return nil, err
+	}
+	if vocabSize == 0 {
+		vocabSize = shape[0]
+	}
+	input := modes.InlineEngramInput(dtype, shape, edges, hashFunction, vocabSize)
+	if precision != "" {
+		input.Precision.StorageDtype = precision
+	}
+	if quantization != "" {
+		input.Precision.Quantization = &modes.EngramQuantization{
+			Scheme: quantization, Lossless: true}
+	}
+	return modes.EncodeEngram(payload, input, lim)
 }
 
 func encodeFloatTiled(

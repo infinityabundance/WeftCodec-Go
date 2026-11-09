@@ -78,8 +78,9 @@ type kvProvVector struct {
 	Expect         *struct {
 		OK bool `json:"ok"`
 	} `json:"expect"`
-	ExpectError string `json:"expect_error"`
-	FrameHex    string `json:"frame_hex"`
+	ExpectError  string `json:"expect_error"`
+	FrameHex     string `json:"frame_hex"`
+	SupersededBy string `json:"superseded_by"`
 }
 
 func jsonValueToWCB(value any) (wcb.Value, error) {
@@ -190,8 +191,8 @@ func provenanceFromVector(t *testing.T, vector kvProvProvenanceVector) modes.KvP
 
 func TestKvProvVectors(t *testing.T) {
 	files := jsonFiles(t, filepath.Join("v1", "kv-prov"))
-	if len(files) != 20 {
-		t.Fatalf("expected 20 KV_CACHE_PROV vectors, found %d", len(files))
+	if len(files) != 21 {
+		t.Fatalf("expected 21 KV_CACHE_PROV vectors, found %d", len(files))
 	}
 	lim := limits.Default()
 	validVectors := 0
@@ -202,6 +203,9 @@ func TestKvProvVectors(t *testing.T) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			var vector kvProvVector
 			loadJSON(t, path, &vector)
+			if vector.SupersededBy != "" {
+				t.Skipf("superseded by %s", vector.SupersededBy)
+			}
 			if vector.ExpectError != "" {
 				frameBytes := mustHex(t, "frame_hex", vector.FrameHex)
 				parsed, err := frame.Parse(frameBytes, lim)

@@ -112,6 +112,9 @@ const (
 	// ModeKvCacheProv is the provenance-bound KV cache page mode
 	// (WEFT-AI-CODEC §20, WEFT-KV-PROVENANCE).
 	ModeKvCacheProv Mode = 19
+	// ModeEngramShard is the incrementally updateable, region-addressable
+	// row-group table mode (WEFT-AI-CODEC §21, WEFT-ENGRAM).
+	ModeEngramShard Mode = 20
 )
 
 // String returns the lowercase mode name.
@@ -157,6 +160,8 @@ func (m Mode) String() string {
 		return "float_tiled_streams"
 	case ModeKvCacheProv:
 		return "kv_cache_prov"
+	case ModeEngramShard:
+		return "engram_shard"
 	default:
 		return fmt.Sprintf("mode(%d)", uint8(m))
 	}
@@ -165,7 +170,7 @@ func (m Mode) String() string {
 // ModeFromU8 validates a wire mode value.
 func ModeFromU8(v uint8) (Mode, error) {
 	switch {
-	case v <= 19:
+	case v <= 20:
 		return Mode(v), nil
 	case v <= 127:
 		return 0, werrors.UnsupportedModef("reserved mode %d is not defined in v1", v)
@@ -217,6 +222,8 @@ func ModeFromName(name string) (Mode, error) {
 		return ModeFloatTiledStreams, nil
 	case "kv_prov", "kv-prov", "kv_cache_prov", "kv-cache-prov", "kcacheprov":
 		return ModeKvCacheProv, nil
+	case "engram_shard", "engram-shard", "engram":
+		return ModeEngramShard, nil
 	default:
 		return 0, werrors.UnsupportedModef("unknown mode %q", name)
 	}
@@ -774,6 +781,32 @@ func validateModeRules(h Header, deps []Dependency, lim limits.Limits) error {
 		}
 		if h.ChunkCount != 0 {
 			return werrors.NewMalformed("DELTA must not be chunked")
+		}
+	case ModeEngramShard:
+		if h.Domain != DomainPayload {
+			return werrors.NewMalformed(
+				"ENGRAM_SHARD frame must use the payload domain")
+		}
+		if dictFlag {
+			return werrors.NewMalformed("DICT_RAW is only valid for DICTIONARY")
+		}
+		if h.DepCount > uint32(lim.MaxDependencyCount) {
+			return werrors.LimitExceededf(
+				"ENGRAM_SHARD dependency count %d exceeds limit %d",
+				h.DepCount, lim.MaxDependencyCount)
+		}
+		for index, dep := range deps {
+			if dep.DepDomain != DepDomainPayload {
+				return werrors.Malformedf(
+					"ENGRAM_SHARD dependency %d must use dep_domain 0 (payload)", index)
+			}
+		}
+		if h.ChunkCount != 0 {
+			return werrors.NewMalformed("ENGRAM_SHARD frame must not be chunked")
+		}
+		if h.BodyLen < 4 {
+			return werrors.NewMalformed(
+				"ENGRAM_SHARD body is shorter than its 4-byte descriptor length")
 		}
 	case ModeTensor, ModeTokenSequence, ModeQuantizedTensor, ModeFloatTensor, ModeTensorSharded, ModeKvCache, ModeActivationStream, ModeTensorTiled, ModeFloatTiled, ModeFloatTiledStreams, ModeKvCacheProv:
 		if h.Domain != DomainPayload {
