@@ -28,6 +28,7 @@ import (
 	"github.com/infinityabundance/WeftCodec-Go/modes"
 	"github.com/infinityabundance/WeftCodec-Go/selector"
 	wefttensor "github.com/infinityabundance/WeftCodec-Go/tensor"
+	"github.com/infinityabundance/WeftCodec-Go/transport"
 	"github.com/infinityabundance/WeftCodec-Go/wcb"
 	"github.com/infinityabundance/WeftCodec-Go/werrors"
 )
@@ -50,6 +51,8 @@ func main() {
 		err = runVerify(ctx, os.Args[2:])
 	case "archive":
 		err = runArchive(ctx, os.Args[2:])
+	case "transport":
+		err = runTransport(os.Args[2:])
 	case "selector":
 		err = runSelector(os.Args[2:])
 	case "context":
@@ -91,6 +94,10 @@ usage:
   weftcodec verify FILE [--deps DIR]
   weftcodec archive create --output FILE FRAME...
   weftcodec archive decode --input FILE --out-dir DIR
+  weftcodec transport create --output FILE --alignment 512|4096|65536 [--roles payload,dependency] FRAME...
+  weftcodec transport inspect --input FILE [--json]
+  weftcodec transport verify --input FILE [--json]
+  weftcodec transport read-section --input FILE --index N --output FILE [--json]
   weftcodec selector id --input FILE [--json]
   weftcodec selector canonicalize --input FILE
   weftcodec context id --selector FILE|- --namespace N --snapshot HEX [--causal HEX,...] [--resolver R] [--capability-hash HEX] [--budget K=V,...] [--json]
@@ -1618,6 +1625,229 @@ func runArchive(ctx context.Context, args []string) error {
 	default:
 		return werrors.NewParse("archive requires create or decode")
 	}
+}
+
+func runTransport(args []string) error {
+	if len(args) < 1 {
+		return werrors.NewParse("transport requires create, inspect, verify, or read-section")
+	}
+	switch args[0] {
+	case "create":
+		fs := flag.NewFlagSet("transport create", flag.ContinueOnError)
+		output := fs.String("output", "", "container output path")
+		alignment := fs.Uint("alignment", 4096, "section alignment: 512, 4096, or 65536")
+		roles := fs.String("roles", "", "comma-separated roles, one per frame")
+		lim := limits.Default()
+		addLimitFlags(fs, &lim)
+		if err := fs.Parse(args[1:]); err != nil {
+			return werrors.NewParse(err.Error())
+		}
+		if *output == "" || fs.NArg() < 1 {
+			return werrors.NewParse("transport create requires --output and at least one frame")
+		}
+		frames := make([][]byte, 0, fs.NArg())
+		for _, path := range fs.Args() {
+			b, err := readLimited(path, lim.MaxFrameBytes)
+			if err != nil {
+				return err
+			}
+			frames = append(frames, b)
+		}
+		roleList := make([]transport.Role, 0, len(frames))
+		if *roles == "" {
+			for range frames {
+				roleList = append(roleList, transport.RolePayload)
+			}
+		} else {
+			for _, text := range strings.Split(*roles, ",") {
+				role, err := transport.ParseRole(strings.TrimSpace(text))
+				if err != nil {
+					return err
+				}
+				roleList = append(roleList, role)
+			}
+		}
+		if len(roleList) != len(frames) {
+			return werrors.NewParse(fmt.Sprintf("%d roles were supplied for %d frames", len(roleList), len(frames)))
+		}
+		items := make([]transport.Item, 0, len(frames))
+		for index, frameBytes := range frames {
+			items = append(items, transport.Item{Bytes: frameBytes, Role: roleList[index]})
+		}
+		container, err := transport.Create(items, uint32(*alignment), lim)
+		if err != nil {
+			return err
+		}
+		return writeOutput(*output, container)
+	case "inspect", "verify":
+		fs := flag.NewFlagSet("transport "+args[0], flag.ContinueOnError)
+		input := fs.String("input", "", "container path")
+		asJSON := fs.Bool("json", false, "emit JSON")
+		lim := limits.Default()
+		if err := fs.Parse(args[1:]); err != nil {
+			return werrors.NewParse(err.Error())
+		}
+		if *input == "" {
+			return werrors.NewParse("transport " + args[0] + " requires --input")
+		}
+		b, err := readLimited(*input, lim.MaxTotalFetchedBytes)
+		if err != nil {
+			return err
+		}
+		var parsed *transport.Transport
+		if args[0] == "verify" {
+			parsed, err = transport.Verify(b, lim)
+		} else {
+			parsed, err = transport.ParseMetadata(b, lim)
+		}
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			value := map[string]any{
+				"schema":               "weft.transport.v1",
+				"flags":                parsed.Header.Flags,
+				"section_count":        parsed.Header.SectionCount,
+				"section_table_offset": parsed.Header.SectionTableOffset,
+				"total_len":            parsed.Header.TotalLen,
+				"payload_hash":         parsed.Header.PayloadHash.Hex(),
+			}
+			if args[0] == "verify" {
+				value["verified"] = true
+			}
+			sections := make([]map[string]any, 0, len(parsed.Sections))
+			for index, section := range parsed.Sections {
+				sections = append(sections, map[string]any{
+					"index":     index,
+					"offset":    section.Offset,
+					"length":    section.Length,
+					"alignment": section.Alignment,
+					"mode":      section.Mode,
+					"role":      section.Role.Name(),
+					"root":      section.Root.Hex(),
+				})
+			}
+			value["sections"] = sections
+			out, err := json.MarshalIndent(value, "", "  ")
+			if err != nil {
+				return werrors.NewIo("cannot serialize transport: " + err.Error())
+			}
+			fmt.Println(string(out))
+			return nil
+		}
+		fmt.Printf("weft.transport.v1 sections=%d total_len=%d payload_hash=%s\n",
+			parsed.Header.SectionCount, parsed.Header.TotalLen, parsed.Header.PayloadHash)
+		for index, section := range parsed.Sections {
+			fmt.Printf("  [%d] offset=%d length=%d alignment=%d mode=%d role=%s root=%s\n",
+				index, section.Offset, section.Length, section.Alignment,
+				section.Mode, section.Role.Name(), section.Root)
+		}
+		return nil
+	case "read-section":
+		fs := flag.NewFlagSet("transport read-section", flag.ContinueOnError)
+		input := fs.String("input", "", "container path")
+		index := fs.Uint("index", 0, "section index")
+		output := fs.String("output", "", "section output path")
+		asJSON := fs.Bool("json", false, "emit JSON")
+		lim := limits.Default()
+		if err := fs.Parse(args[1:]); err != nil {
+			return werrors.NewParse(err.Error())
+		}
+		if *input == "" || *output == "" {
+			return werrors.NewParse("transport read-section requires --input and --output")
+		}
+		file, err := os.Open(*input)
+		if err != nil {
+			return werrors.NewIo("cannot open " + *input + ": " + err.Error())
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			return werrors.NewIo("cannot stat " + *input + ": " + err.Error())
+		}
+		reader := &fileRange{file: file}
+		headerBytes, err := reader.ReadRange(0, transport.HeaderLen)
+		if err != nil {
+			return err
+		}
+		header, err := transport.ReadHeader(headerBytes)
+		if err != nil {
+			return err
+		}
+		if header.TotalLen != uint64(info.Size()) {
+			return werrors.Malformedf(
+				"transport total_len %d does not match the file's %d bytes",
+				header.TotalLen, info.Size())
+		}
+		tableLen := uint64(header.SectionCount) * transport.SectionEntryLen
+		table, err := reader.ReadRange(transport.HeaderLen, tableLen)
+		if err != nil {
+			return err
+		}
+		sections, err := transport.ReadSectionTable(header, table)
+		if err != nil {
+			return err
+		}
+		if int(*index) >= len(sections) {
+			return werrors.NewParse(fmt.Sprintf(
+				"section index %d is outside the %d sections", *index, len(sections)))
+		}
+		section := sections[*index]
+		bytesRead, err := transport.FetchSection(reader, section)
+		if err != nil {
+			return err
+		}
+		if _, err := transport.VerifySectionBytes(section, bytesRead, lim); err != nil {
+			return err
+		}
+		if err := writeOutput(*output, bytesRead); err != nil {
+			return err
+		}
+		if *asJSON {
+			value := map[string]any{
+				"schema":                "weft.transport.v1",
+				"section":               *index,
+				"offset":                section.Offset,
+				"length":                section.Length,
+				"alignment":             section.Alignment,
+				"mode":                  section.Mode,
+				"role":                  section.Role.Name(),
+				"root":                  section.Root.Hex(),
+				"bytes_read":            len(bytesRead),
+				"payload_hash_verified": false,
+			}
+			out, err := json.MarshalIndent(value, "", "  ")
+			if err != nil {
+				return werrors.NewIo("cannot serialize section read: " + err.Error())
+			}
+			fmt.Println(string(out))
+		}
+		return nil
+	default:
+		return werrors.NewParse("transport requires create, inspect, verify, or read-section")
+	}
+}
+
+// fileRange issues positional reads without reading the whole container.
+type fileRange struct {
+	file *os.File
+}
+
+func (f *fileRange) ReadRange(offset, length uint64) ([]byte, error) {
+	size, err := limits.ToInt(length, "range length")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, size)
+	done := 0
+	for done < size {
+		n, err := f.file.ReadAt(out[done:], int64(offset)+int64(done))
+		if err != nil && n == 0 {
+			return nil, werrors.NewIo("short read while fetching a transport section")
+		}
+		done += n
+	}
+	return out, nil
 }
 
 func runSelector(args []string) error {

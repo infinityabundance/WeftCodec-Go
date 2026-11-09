@@ -129,6 +129,32 @@ func Domain(domain string, data []byte) Hash32 {
 	return out
 }
 
+// DomainHasher is an incremental domain-separated digest. It is byte-identical
+// to Domain(domain, concatenation of every Update argument).
+type DomainHasher struct {
+	hasher *blake3.Hasher
+}
+
+// NewDomainHasher starts a domain-separated digest.
+func NewDomainHasher(domain string) *DomainHasher {
+	hasher := blake3.New(HashLen, nil)
+	writePrefix(hasher, domain)
+	return &DomainHasher{hasher: hasher}
+}
+
+// Update feeds the next piece of the hashed data.
+func (d *DomainHasher) Update(data []byte) {
+	_, _ = d.hasher.Write(data)
+}
+
+// Finalize finishes the digest.
+func (d *DomainHasher) Finalize() Hash32 {
+	var out Hash32
+	sum := d.hasher.Sum(out[:0])
+	copy(out[:], sum)
+	return out
+}
+
 // DomainReader hashes a stream under a domain without buffering the input.
 func DomainReader(domain string, r io.Reader) (Hash32, error) {
 	hasher := blake3.New(HashLen, nil)

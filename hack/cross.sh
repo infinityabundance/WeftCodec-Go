@@ -227,7 +227,9 @@ rust_gen() {
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/reference.wft1" "$RUST")"
   cp "$CROSS/src/base.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/delta.wft1" "$RUST")"
   cp "$CROSS/src/dict.bin" "$CROSS/rust/deps/$(dep_hash "$CROSS/rust/dictionary.wft1" "$RUST")"
-  echo "rust-gen: wrote $(find "$CROSS/rust" -name '*.wft1' | wc -l) frames to $CROSS/rust"
+  "$RUST" transport create --output "$CROSS/rust/transport_4096.wftt" --alignment 4096     --roles payload,dependency "$CROSS/rust/raw.wft1" "$CROSS/rust/engram_bf16.wft1"
+  "$RUST" transport create --output "$CROSS/rust/transport_512.wftt" --alignment 512     --roles payload,metadata,dependency "$CROSS/rust/float_tiled_bf16.wft1" "$CROSS/rust/engram_fp32.wft1" "$CROSS/rust/tensor_tiled_bf16.wft1"
+  echo "rust-gen: wrote $(find "$CROSS/rust" -name '*.wft1' | wc -l) frames and 2 containers to $CROSS/rust"
 }
 
 go_build() {
@@ -290,7 +292,9 @@ go_gen() {
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/reference.wft1" "$GO")"
   cp "$CROSS/src/base.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/delta.wft1" "$GO")"
   cp "$CROSS/src/dict.bin" "$CROSS/go/deps/$(dep_hash "$CROSS/go/dictionary.wft1" "$GO")"
-  echo "go-gen: wrote $(find "$CROSS/go" -name '*.wft1' | wc -l) frames to $CROSS/go"
+  "$GO" transport create --output "$CROSS/go/transport_4096.wftt" --alignment 4096     --roles payload,dependency "$CROSS/go/raw.wft1" "$CROSS/go/engram_bf16.wft1"
+  "$GO" transport create --output "$CROSS/go/transport_512.wftt" --alignment 512     --roles payload,metadata,dependency "$CROSS/go/float_tiled_bf16.wft1" "$CROSS/go/engram_fp32.wft1" "$CROSS/go/tensor_tiled_bf16.wft1"
+  echo "go-gen: wrote $(find "$CROSS/go" -name '*.wft1' | wc -l) frames and 2 containers to $CROSS/go"
 }
 
 go_decode() {
@@ -458,6 +462,32 @@ compare() {
       echo "YES byte-identical $mode"
     else
       echo "NO  byte-identical $mode"; failures=$((failures + 1))
+    fi
+  done
+
+  echo "== weft.transport.v1 byte identity and cross verification =="
+  for name in transport_4096 transport_512; do
+    if cmp -s "$CROSS/rust/$name.wftt" "$CROSS/go/$name.wftt"; then
+      echo "YES byte-identical $name"
+    else
+      echo "NO  byte-identical $name"; failures=$((failures + 1))
+    fi
+    if "$RUST" transport verify --input "$CROSS/go/$name.wftt" >/dev/null; then
+      echo "PASS rust verifies go $name"
+    else
+      echo "FAIL rust verifies go $name"; failures=$((failures + 1))
+    fi
+    if "$GO" transport verify --input "$CROSS/rust/$name.wftt" >/dev/null; then
+      echo "PASS go verifies rust $name"
+    else
+      echo "FAIL go verifies rust $name"; failures=$((failures + 1))
+    fi
+    if "$RUST" transport read-section --input "$CROSS/go/$name.wftt" --index 0         --output "$CROSS/rust/$name.section0" >/dev/null &&
+       "$GO" transport read-section --input "$CROSS/rust/$name.wftt" --index 0         --output "$CROSS/go/$name.section0" >/dev/null &&
+       cmp -s "$CROSS/rust/$name.section0" "$CROSS/go/$name.section0"; then
+      echo "PASS single-section fetch $name"
+    else
+      echo "FAIL single-section fetch $name"; failures=$((failures + 1))
     fi
   done
 
